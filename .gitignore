@@ -9,4 +9,4 @@ build/tests.js
 npm-debug.log
 doc
 .cache
-dist
+#dist
