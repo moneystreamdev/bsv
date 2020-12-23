@@ -9,6 +9,32 @@ import randomBytes from 'randombytes';
 
 var version = "2.0.0-beta.39";
 
+/**
+ * Big Number
+ * ==========
+ *
+ * Since javascript numbers are only precise up to 53 bits, and bitcoin is
+ * based on cryptography that uses 256 bit numbers, we must use a big number
+ * library. The library we use at the moment is Fedor Indutny's bn.js library.
+ * Since big numbers are extremely useful, we provide some very basic wrappers
+ * for his big number class and expose it. The wrappers merely allow you to do,
+ * say, bn.cmp(num) instead of just bn.cmp(bn), which is nice. The primary way
+ * to use this is:
+ * const bn = Bn(str) // str is base 10
+ * const bn = Bn(num)
+ * const bn = Bn().fromBuffer(buf)
+ * const bn = Bn().fromSm(buf); // sign+magnitude format, first bit is sign
+ *
+ * For little endian, pass in an options value:
+ * const bn = Bn().fromBuffer(buf, {endian: 'little'})
+ * const bn = Bn().fromSm(buf, {endian: 'little'})
+ *
+ * Getting output:
+ * const str = Bn().toString() // produces base 10 string
+ * const buf = Bn().toBuffer() // produces buffer representation
+ * const buf = Bn().toBuffer({size: 32}) //produced 32 byte buffer
+ */
+
 function Bn(n, base, ...rest) {
   if (!(this instanceof Bn)) {
     return new Bn(n, base, ...rest);
@@ -132,6 +158,10 @@ Bn.prototype.toBuffer = function (opts = {
 Bn.prototype.toFastBuffer = Bn.prototype.toBuffer;
 Bn.fromFastBuffer = Bn.fromBuffer;
 Bn.prototype.fromFastBuffer = Bn.prototype.fromBuffer;
+/**
+   * Signed magnitude buffer. Most significant bit represents sign (0 = positive,
+   * 1 = negative).
+   */
 
 Bn.prototype.fromSm = function (buf, opts = {
   endian: 'big'
@@ -189,10 +219,17 @@ Bn.prototype.toSm = function (opts = {
 
   return buf;
 };
+/**
+   * Produce a Bn from the "bits" value in a blockheader. Analagous to Bitcoin
+   * Core's uint256 SetCompact method. bits is assumed to be UInt32.
+   */
+
 
 Bn.prototype.fromBits = function (bits, opts = {
   strict: false
 }) {
+  // To performed bitwise operations in javascript, we need to convert to a
+  // signed 32 bit value.
   let buf = Buffer.alloc(4);
   buf.writeUInt32BE(bits, 0);
   bits = buf.readInt32BE(0);
@@ -222,6 +259,11 @@ Bn.prototype.fromBits = function (bits, opts = {
 
   return this;
 };
+/**
+   * Convert Bn to the "bits" value in a blockheader. Analagous to Bitcoin
+   * Core's uint256 GetCompact method. bits is a UInt32.
+   */
+
 
 Bn.prototype.toBits = function () {
   let buf;
@@ -244,6 +286,8 @@ Bn.prototype.toBits = function () {
   }
 
   if (nword & 0x00800000) {
+    // The most significant bit denotes sign. Do not want unless number is
+    // actually negative.
     nword >>= 8;
     nsize++;
   }
@@ -252,11 +296,18 @@ Bn.prototype.toBits = function () {
     nword |= 0x00800000;
   }
 
-  const bits = nsize << 24 | nword;
+  const bits = nsize << 24 | nword; // convert bits to UInt32 before returning
+
   buf = Buffer.alloc(4);
   buf.writeInt32BE(bits, 0);
   return buf.readUInt32BE(0);
-};
+}; // This is analogous to the constructor for CScriptNum in bitcoind. Many ops
+// in bitcoind's script interpreter use CScriptNum, which is not really a
+// proper bignum. Instead, an error is thrown if trying to input a number
+// bigger than 4 bytes. We copy that behavior here. There is one exception -
+// in CHECKLOCKTIMEVERIFY, the numbers are allowed to be up to 5 bytes long.
+// We allow for setting that variable here for use in CHECKLOCKTIMEVERIFY.
+
 
 Bn.prototype.fromScriptNumBuffer = function (buf, fRequireMinimal, nMaxNumSize) {
   if (nMaxNumSize === undefined) {
@@ -268,7 +319,18 @@ Bn.prototype.fromScriptNumBuffer = function (buf, fRequireMinimal, nMaxNumSize) 
   }
 
   if (fRequireMinimal && buf.length > 0) {
+    // Check that the number is encoded with the minimum possible
+    // number of bytes.
+    //
+    // If the most-significant-byte - excluding the sign bit - is zero
+    // then we're not minimal. Note how this test also rejects the
+    // negative-zero encoding, 0x80.
     if ((buf[buf.length - 1] & 0x7f) === 0) {
+      // One exception: if there's more than one byte and the most
+      // significant bit of the second-most-significant-byte is set
+      // it would conflict with the sign bit. An example of this case
+      // is +-255, which encode to 0xff00 and 0xff80 respectively.
+      // (big-endian).
       if (buf.length <= 1 || (buf[buf.length - 2] & 0x80) === 0) {
         throw new Error('non-minimally encoded script number');
       }
@@ -278,7 +340,11 @@ Bn.prototype.fromScriptNumBuffer = function (buf, fRequireMinimal, nMaxNumSize) 
   return this.fromSm(buf, {
     endian: 'little'
   });
-};
+}; // The corollary to the above, with the notable exception that we do not throw
+// an error if the output is larger than four bytes. (Which can happen if
+// performing a numerical operation that results in an overflow to more than 4
+// bytes).
+
 
 Bn.prototype.toScriptNumBuffer = function (buf) {
   return this.toSm({
@@ -325,6 +391,10 @@ Bn.prototype.mul = function (bn) {
 
   return bn;
 };
+/**
+   * to be used if this is positive.
+   */
+
 
 Bn.prototype.mod = function (bn) {
   const _bn = _Bn.prototype.mod.call(this, bn);
@@ -335,6 +405,10 @@ Bn.prototype.mod = function (bn) {
 
   return bn;
 };
+/**
+   * to be used if this is negative.
+   */
+
 
 Bn.prototype.umod = function (bn) {
   const _bn = _Bn.prototype.umod.call(this, bn);
@@ -369,11 +443,18 @@ Bn.prototype.div = function (bn) {
 Bn.prototype.cmp = function (bn) {
   return _Bn.prototype.cmp.call(this, bn);
 };
+/**
+   * All the standard big number operations operate on other big numbers. e.g.,
+   * bn1.add(bn2). But it is frequenly valuble to add numbers or strings, e.g.
+   * bn.add(5) or bn.add('5'). The decorator wraps all methods where this would
+   * be convenient and makes that possible.
+   */
+
 
 function decorate(name) {
   Bn.prototype['_' + name] = Bn.prototype[name];
 
-  const f = function (b) {
+  const f = function f(b) {
     if (typeof b === 'string') {
       b = new Bn(b);
     } else if (typeof b === 'number') {
@@ -421,6 +502,18 @@ decorate('gt');
 decorate('geq');
 decorate('lt');
 decorate('leq');
+
+/**
+ * Buffer Reader
+ * =============
+ *
+ * This is a convenience class for reading VarInts and other basic types from a
+ * buffer. This class is most useful for reading VarInts, and also for signed
+ * or unsigned integers of various types. It can also read a buffer in reverse
+ * order, which is useful in bitcoin which uses little endian numbers a lot so
+ * you find that you must reverse things. You probably want to use it like:
+ * varInt = new Br(buf).readnew VarInt()
+ */
 
 class Br {
   constructor(buf) {
@@ -593,6 +686,15 @@ class Br {
   }
 
 }
+
+/**
+ * Buffer Writer
+ * =============
+ *
+ * This is the writing complement of the Br. You can easily write
+ * VarInts and other basic number types. The way to use it is: buf =
+ * new Bw().write(buf1).write(buf2).toBuffer()
+ */
 
 class Bw {
   constructor(bufs) {
@@ -786,6 +888,44 @@ class Bw {
 
 }
 
+/**
+ * Structure
+ * =========
+ *
+ * A convenient structure to extend objects from that comes with very common
+ * boiler plate instance methods:
+ * - fromObject
+ * - fromBr
+ * - toBw
+ * - fromBuffer
+ * - fromFastBuffer
+ * - toBuffer
+ * - toFastBuffer
+ * - fromHex
+ * - toHex
+ * - fromString
+ * - toString
+ * - fromJSON
+ * - toJSON
+ * - cloneByBuffer
+ * - cloneByFastBuffer
+ * - cloneByHex
+ * - cloneByString
+ * - cloneByJSON
+ *
+ * As well as static methods for:
+ * - fromObject
+ * - fromBr
+ * - fromBuffer
+ * - fromFastBuffer
+ * - fromHex
+ * - fromString
+ * - fromJSON
+ *
+ * The "expect" method also facilitates deserializing a sequence of buffers
+ * into an object.
+ */
+
 class Struct {
   constructor(obj) {
     this.fromObject(obj);
@@ -840,10 +980,28 @@ class Struct {
   asyncToBw(bw) {
     throw new Error('not implemented');
   }
+  /**
+     * It is very often the case that you want to create a bitcoin object from a
+     * stream of small buffers rather than from a buffer of the correct length.
+     * For instance, if streaming from the network or disk. The genFromBuffers
+     * method is a generator which produces an iterator. Use .next(buf) to pass
+     * in a small buffer. The iterator will end when it has received enough data
+     * to produce the object. In some cases it is able to yield the number of
+     * bytes it is expecting, but that is not always known.
+     */
+
 
   *genFromBuffers() {
     throw new Error('not implemented');
   }
+  /**
+     * A convenience method used by from the genFromBuffers* generators.
+     * Basically lets you expect a certain number of bytes (len) and keeps
+     * yielding until you give it enough. It yields the expected amount
+     * remaining, and returns an object containing a buffer of the expected
+     * length, and, if any, the remainder buffer.
+     */
+
 
   *expect(len, startbuf) {
     let buf = startbuf;
@@ -876,6 +1034,10 @@ class Struct {
       remainderbuf: remainderbuf
     };
   }
+  /**
+     * Convert a buffer into an object, i.e. deserialize the object.
+     */
+
 
   fromBuffer(buf, ...rest) {
     if (!Buffer.isBuffer(buf)) {
@@ -902,6 +1064,10 @@ class Struct {
   static asyncFromBuffer(buf, ...rest) {
     return new this().asyncFromBuffer(buf, ...rest);
   }
+  /**
+     * The complement of toFastBuffer - see description for toFastBuffer
+     */
+
 
   fromFastBuffer(buf, ...rest) {
     if (buf.length === 0) {
@@ -914,6 +1080,11 @@ class Struct {
   static fromFastBuffer(...rest) {
     return new this().fromFastBuffer(...rest);
   }
+  /**
+     * Convert the object into a buffer, i.e. serialize the object. This method
+     * may block the main thread.
+     */
+
 
   toBuffer(...rest) {
     return this.toBw(...rest).toBuffer();
@@ -922,6 +1093,22 @@ class Struct {
   asyncToBuffer(...rest) {
     return this.asyncToBw(...rest).then(bw => bw.toBuffer());
   }
+  /**
+     * Sometimes the toBuffer method has cryptography and blocks the main thread,
+     * and we need a non-blocking way to serialize an object. That is what
+     * toFastBuffer is. Of course it defaults to just using toBuffer if an object
+     * hasn't implemented it. If your regular toBuffer method blocks, like with
+     * Bip32, then you should implement this method to be non-blocking. This
+     * method is used to send objects to the workers. i.e., for converting a
+     * Bip32 object to a string, we need to encode it as a buffer in a
+     * non-blocking manner with toFastBuffer, send it to a worker, then the
+     * worker converts it to a string, which is a blocking operation.
+     *
+     * It is very common to want to convert a blank object to a zero length
+     * buffer, so we can transport a blank object to a worker. So that behavior
+     * is included by default.
+     */
+
 
   toFastBuffer(...rest) {
     if (Object.keys(this).length === 0) {
@@ -1034,6 +1221,7 @@ class Struct {
     var json = {};
 
     for (var val in this) {
+      // arrays
       if (Array.isArray(this[val])) {
         const arr = [];
 
@@ -1045,23 +1233,23 @@ class Struct {
           }
         }
 
-        json[val] = arr;
+        json[val] = arr; // objects
       } else if (this[val] === null) {
         json[val] = this[val];
       } else if (typeof this[val] === 'object' && typeof this[val].toJSON === 'function') {
-        json[val] = this[val].toJSON();
+        json[val] = this[val].toJSON(); // booleans, numbers, and strings
       } else if (typeof this[val] === 'boolean' || typeof this[val] === 'number' || typeof this[val] === 'string') {
-        json[val] = this[val];
+        json[val] = this[val]; // buffers
       } else if (Buffer.isBuffer(this[val])) {
-        json[val] = this[val].toString('hex');
+        json[val] = this[val].toString('hex'); // map
       } else if (this[val] instanceof Map) {
-        json[val] = JSON.stringify(this[val]);
+        json[val] = JSON.stringify(this[val]); // throw an error for objects that do not implement toJSON
       } else if (typeof this[val] === 'object') {
         throw new Error('not implemented');
       }
     }
 
-    return json;
+    return json; // throw new Error('not implemented')
   }
 
   asyncToJSON() {
@@ -1069,6 +1257,8 @@ class Struct {
   }
 
   clone() {
+    // TODO: Should this be more intelligent about picking which clone method
+    // to default to?
     return this.cloneByJSON();
   }
 
@@ -1093,6 +1283,13 @@ class Struct {
   }
 
 }
+
+/**
+ * Base58 Encoding
+ * ===============
+ *
+ * Base58 (no check)
+ */
 
 class Base58 extends Struct {
   constructor(buf) {
@@ -1146,6 +1343,24 @@ class Base58 extends Struct {
 
 }
 
+/**
+ * Constant-Time Buffer Compare
+ * ============================
+ *
+ * A constant-time comparison function. This should be used in any security
+ * sensitive code where leaking timing information may lead to lessened
+ * security. Note that if the buffers are not equal in length, this function
+ * loops for the longest buffer, which may not be necessary. Usually this
+ * function should be used for buffers that would otherwise be equal length,
+ * such as a hash, particularly Hmacs.
+ *
+ * The algorithm here, which is XORs each byte (or, if undefined, 0) with the
+ * corresponding other byte, and then ORs that with a running total (d), is
+ * adapted from here:
+ *
+ * https://groups.google.com/forum/#!topic/keyczar-discuss/VXHsoJSLKhM
+ */
+
 const cmp = (buf1, buf2) => {
   if (!Buffer.isBuffer(buf1) || !Buffer.isBuffer(buf2)) {
     throw new Error('buf1 and buf2 must be buffers');
@@ -1165,6 +1380,17 @@ const cmp = (buf1, buf2) => {
 
   return d === 0;
 };
+
+/**
+ * WorkersResult
+ * =============
+ *
+ * A response sent back from a worker to the main thread. Contains the "result"
+ * of the computation in the form of a buffer, resbuf. If the actual result is
+ * an object with a .toFastBuffer method, the object is converted to a buffer
+ * using that method. Otherwise it is JSON serialized into a buffer. The result
+ * can also be an error, in which case the isError flag is set.
+ */
 
 class WorkersResult extends Struct {
   constructor(resbuf, isError, id) {
@@ -1222,6 +1448,24 @@ class WorkersResult extends Struct {
 
 }
 
+/**
+ * Workers
+ * =======
+ *
+ * Workers manages either processes (in node) or threads (in a browser). The
+ * workers are intended to handle CPU-heavy tasks that block IO. This class is
+ * a little unusual in that it must use different interfaces whether in node or
+ * in the browser. In node, we use node's build-in child_process fork to create
+ * new workers we can communicate with. In the browser, we use web workers.
+ * Unfortunately, node and web browsers do not have a common interface for
+ * workers. There is a node module called webworker-threads for node that
+ * mimics the browser's web workers, but unfortunately it does not support
+ * require(), and thus isn't very useful in our case. Therefore we fall back to
+ * process forks.
+ *
+ * You probably don't need to use this class directly. Use Work, which will
+ * automatically spawn new workers if needed.
+ */
 let globalWorkers;
 
 class Workers {
@@ -1275,6 +1519,14 @@ class Workers {
   }
 
 }
+
+/**
+ * Hash
+ * ====
+ *
+ * Some hash functions are used through out bitcoin. We expose them here as a
+ * convenience.
+ */
 
 class Hash {}
 
@@ -1385,7 +1637,9 @@ Hash.hmac = function (hashFStr, data, key) {
 
   if (!Buffer.isBuffer(data) || !Buffer.isBuffer(key)) {
     throw new Error('data and key must be buffers');
-  }
+  } // http://en.wikipedia.org/wiki/Hash-based_message_authentication_code
+  // http://tools.ietf.org/html/rfc4868#section-2
+
 
   const blockSize = hashf.blockSize / 8;
 
@@ -1446,6 +1700,14 @@ Hash.asyncSha512Hmac = async function (data, key) {
 };
 
 Hash.sha512Hmac.bitsize = 512;
+
+/**
+ * Base58 Check Encoding
+ * =====================
+ *
+ * Base58 check encoding. The usual way to use it is
+ * new Base58Check(buf).toString() or new Base58Check(str).toBuffer().
+ */
 
 class Base58Check extends Struct {
   constructor(buf) {
@@ -1569,9 +1831,16 @@ class ConfigBuilder {
 
 const config = new ConfigBuilder().addValue('NETWORK', process.env.NETWORK || 'mainnet').build();
 
+/**
+ * Constants
+ * =========
+ *
+ * Constants used to distinguish mainnet from testnet.
+ */
 const Constants = {};
 Constants.Mainnet = {
   maxsize: 0x02000000,
+  // MAX_SIZE
   Address: {
     pubKeyHash: 0x00
   },
@@ -1585,16 +1854,21 @@ Constants.Mainnet = {
   },
   Msg: {
     magicNum: 0xf9beb4d9,
-    versionBytesNum: 70012
+    versionBytesNum: 70012 // as of Bitcoin Core v0.12.0
+
   },
   PrivKey: {
     versionByteNum: 0x80
   },
   TxBuilder: {
     dust: 546,
+    // number of satoshis that an output can't be less than
     feePerKbNum: 0.00000500e8
   },
   Workers: {
+    // Cannot be 5 seconds. This is actually too low for low end devices. We
+    // have found by experimenting with Chrome developer tools that 60 seconds
+    // works on low end mobile.
     timeout: 60000
   }
 };
@@ -1612,7 +1886,8 @@ Constants.Testnet = Object.assign({}, Constants.Mainnet, {
   },
   Msg: {
     magicNum: 0x0b110907,
-    versionBytesNum: 70012
+    versionBytesNum: 70012 // as of Bitcoin Core v0.12.0
+
   },
   PrivKey: {
     versionByteNum: 0xef
@@ -1632,12 +1907,20 @@ Constants.Regtest = Object.assign({}, Constants.Mainnet, {
   },
   Msg: {
     magicNum: 0x0b110907,
-    versionBytesNum: 70012
+    versionBytesNum: 70012 // as of Bitcoin Core v0.12.0
+
   },
   PrivKey: {
     versionByteNum: 0xef
   }
 });
+/**
+ * Yours Bitcoin can be globally configured to mainnet or testnet. Via the
+ * inject pattern, you always have access to the other network at any time.
+ * However, it is very convenient to be able to change the default
+ * configuration. The default is mainnet, which can be changed to testnet.
+ */
+// Constants.Default = Object.assign({}, Constants.Mainnet)
 
 if (config.get('NETWORK') === 'testnet') {
   Constants.Default = Object.assign({}, Constants.Testnet);
@@ -1649,7 +1932,18 @@ if (config.get('NETWORK') === 'testnet') {
   throw new Error(`must set network in environment variable - mainnet, testnet or regtest?, received ${config.get('NETWORK')}`);
 }
 
+/*
+ * OpCode
+ * ======
+ *
+ * An opCode is one of the operations in the bitcoin scripting language. Each
+ * operation is just a number from 0-255, and it has a corresponding string,
+ * e.g. "OP_RETURN", which comes from the name of that constant in the bitcoind
+ * source code. The way you probably want to use this is with
+ * new OpCode(str).toNumber() or new OpCode(num).toString()
+ */
 const map = {
+  // push value
   OP_FALSE: 0x00,
   OP_0: 0x00,
   OP_PUSHDATA1: 0x4c,
@@ -1674,6 +1968,7 @@ const map = {
   OP_14: 0x5e,
   OP_15: 0x5f,
   OP_16: 0x60,
+  // control
   OP_NOP: 0x61,
   OP_VER: 0x62,
   OP_IF: 0x63,
@@ -1684,6 +1979,7 @@ const map = {
   OP_ENDIF: 0x68,
   OP_VERIFY: 0x69,
   OP_RETURN: 0x6a,
+  // stack ops
   OP_TOALTSTACK: 0x6b,
   OP_FROMALTSTACK: 0x6c,
   OP_2DROP: 0x6d,
@@ -1703,11 +1999,13 @@ const map = {
   OP_ROT: 0x7b,
   OP_SWAP: 0x7c,
   OP_TUCK: 0x7d,
+  // splice ops
   OP_CAT: 0x7e,
   OP_SUBSTR: 0x7f,
   OP_LEFT: 0x80,
   OP_RIGHT: 0x81,
   OP_SIZE: 0x82,
+  // bit logic
   OP_INVERT: 0x83,
   OP_AND: 0x84,
   OP_OR: 0x85,
@@ -1716,6 +2014,7 @@ const map = {
   OP_EQUALVERIFY: 0x88,
   OP_RESERVED1: 0x89,
   OP_RESERVED2: 0x8a,
+  // numeric
   OP_1ADD: 0x8b,
   OP_1SUB: 0x8c,
   OP_2MUL: 0x8d,
@@ -1743,6 +2042,7 @@ const map = {
   OP_MIN: 0xa3,
   OP_MAX: 0xa4,
   OP_WITHIN: 0xa5,
+  // crypto
   OP_RIPEMD160: 0xa6,
   OP_SHA1: 0xa7,
   OP_SHA256: 0xa8,
@@ -1753,6 +2053,7 @@ const map = {
   OP_CHECKSIGVERIFY: 0xad,
   OP_CHECKMULTISIG: 0xae,
   OP_CHECKMULTISIGVERIFY: 0xaf,
+  // expansion
   OP_NOP1: 0xb0,
   OP_NOP2: 0xb1,
   OP_CHECKLOCKTIMEVERIFY: 0xb1,
@@ -1765,6 +2066,7 @@ const map = {
   OP_NOP8: 0xb7,
   OP_NOP9: 0xb8,
   OP_NOP10: 0xb9,
+  // template matching params
   OP_SMALLDATA: 0xf9,
   OP_SMALLINTEGER: 0xfa,
   OP_PUBKEYS: 0xfb,
@@ -1834,6 +2136,17 @@ for (const opCodeStr in map) {
   }
 }
 
+/**
+ * Point (on secp256k1)
+ * ====================
+ *
+ * A point is a point on the secp256k1 curve which is the elliptic curve used
+ * by bitcoin. This code is a wrapper for Fedor Indutny's Point class from his
+ * elliptic library. This code adds a few minor conveniences, but is mostly the
+ * same. Since Fedor's code returns points and big numbers that are instances
+ * of his point and big number classes, we have to wrap all the methods such as
+ * getX() to return the Yours Bitcoin point and big number types.
+ */
 const ec = elliptic.curves.secp256k1;
 
 const _point = ec.curve.point();
@@ -1944,7 +2257,8 @@ class Point extends _Point {
 
   static getN() {
     return new Bn(ec.curve.n.toArray());
-  }
+  } // https://www.iacr.org/archive/pkc2003/25670211/25670211.pdf
+
 
   validate() {
     const p2 = Point.fromX(this.getY().isOdd(), this.getX());
@@ -1961,6 +2275,14 @@ class Point extends _Point {
   }
 
 }
+
+/**
+ * Public Key
+ * ==========
+ *
+ * A public key corresponds to a private key. If you have a private key, you
+ * can find the corresponding public key with new PubKey().fromPrivKey(privKey).
+ */
 
 class PubKey extends Struct {
   constructor(point, compressed) {
@@ -2021,6 +2343,14 @@ class PubKey extends Struct {
     this.compressed = compressed;
     return this;
   }
+  /**
+     * In order to mimic the non-strict style of OpenSSL, set strict = false. For
+     * information and what prefixes 0x06 and 0x07 mean, in addition to the normal
+     * compressed and uncompressed public keys, see the message by Peter Wuille
+     * where he discovered these "hybrid pubKeys" on the mailing list:
+     * http://sourceforge.net/p/bitcoin/mailman/message/29416133/
+     */
+
 
   fromDer(buf, strict) {
     if (strict === undefined) {
@@ -2134,26 +2464,35 @@ class PubKey extends Struct {
     const compressed = this.compressed === undefined ? true : this.compressed;
     return this.toDer(compressed).toString('hex');
   }
+  /**
+     * Translated from bitcoind's IsCompressedOrUncompressedPubKey
+     */
+
 
   static isCompressedOrUncompressed(buf) {
     if (buf.length < 33) {
+      //  Non-canonical public key: too short
       return false;
     }
 
     if (buf[0] === 0x04) {
       if (buf.length !== 65) {
+        //  Non-canonical public key: invalid length for uncompressed key
         return false;
       }
     } else if (buf[0] === 0x02 || buf[0] === 0x03) {
       if (buf.length !== 33) {
+        //  Non-canonical public key: invalid length for compressed key
         return false;
       }
     } else {
+      //  Non-canonical public key: neither compressed nor uncompressed
       return false;
     }
 
     return true;
-  }
+  } // https://www.iacr.org/archive/pkc2003/25670211/25670211.pdf
+
 
   validate() {
     if (this.point.isInfinity()) {
@@ -2170,11 +2509,37 @@ class PubKey extends Struct {
 
 }
 
+/**
+ * Random Number Generator
+ * =======================
+ *
+ * Random numbers are important in bitcoin primarily for generating private
+ * keys. It is also important for creating signatures if you are using a random
+ * value of k, but Yours Bitcoin defaults to using deterministic k. That means
+ * computing a random private key, or a random seed for use in Bip39 or Bip32,
+ * is the primary use of the random number generator.  Note that the simplicity
+ * of this class is extremely carefully considered. It is easy to audit that
+ * this code runs node's randomBytes function. It is also easy to audit that
+ * the randomBytes method is correctly interpreted as
+ * window.crypto.getRandomValues when this code is browserified by browserify,
+ * and thus also works correctly in the browser. We deliberately do not do
+ * anything else to this random number in order to minimize possible errors in
+ * this absolutely critical code.
+ */
+
 class Random {}
 
 Random.getRandomBuffer = function (size) {
   return randomBytes(size);
 };
+
+/**
+ * Private Key
+ * ===========
+ *
+ * A private key is used for signing transactions (or messages). The primary
+ * way to use this is new PrivKey().fromRandom(), or new PrivKey().fromBuffer(buf).
+ */
 
 class PrivKey extends Struct {
   constructor(bn, compressed, constants = null) {
@@ -2276,10 +2641,18 @@ class PrivKey extends Struct {
 
     return this;
   }
+  /**
+     * Output the private key a Wallet Import Format (Wif) string.
+     */
+
 
   toWif() {
     return Base58Check.encode(this.toBuffer());
   }
+  /**
+     * Input the private key from a Wallet Import Format (Wif) string.
+     */
+
 
   fromWif(str) {
     return this.fromBuffer(Base58Check.decode(str));
@@ -2312,6 +2685,32 @@ PrivKey.Testnet = class extends PrivKey {
 
 };
 
+/**
+ * Signature
+ * =========
+ *
+ * A signature is the thing you make when you want to sign a transaction, or
+ * the thing you want to verify if you want to ensure that someone signed a
+ * transaction. It has an r and s value, which are the cryptographic big
+ * numbers that define a signature. And since this is a bitcoin library, it
+ * also has nHashType, which is the way to hash a transaction and is used in
+ * the binary format of a signature when it is in a transaction. We also
+ * support a public key recover value, recovery, allowing one to compute the
+ * public key from a signature. The "compressed" value is also necessary to
+ * accurately compute the public key from a signature.
+ *
+ * There are a few different formats of a signature in bitcoin. One is DER, the
+ * other is the TxFormat which is the same as DER but with the nHashType byte
+ * appended, and the final one is Compact, which is used by Bitcoin Signed
+ * Message (Bsm).
+ */
+/**
+   * r, s: big numbers constiting a cryptographic signature
+   * nHashType: found at the end of a signature in a transaction
+   * recovery: public key recovery number
+   * compressed: whether the recovered pubKey is compressed
+   */
+
 class Sig extends Struct {
   constructor(r, s, nHashType, recovery, compressed) {
     super({
@@ -2343,7 +2742,8 @@ class Sig extends Struct {
     }
 
     return this.toDer();
-  }
+  } // The format used by "message"
+
 
   fromCompact(buf) {
     let compressed = true;
@@ -2388,7 +2788,8 @@ class Sig extends Struct {
 
   static fromRS(rsbuf) {
     return new this().fromRS(rsbuf);
-  }
+  } // The format used in a tx, except without the nHashType at the end
+
 
   fromDer(buf, strict) {
     const obj = Sig.parseDer(buf, strict);
@@ -2399,10 +2800,12 @@ class Sig extends Struct {
 
   static fromDer(buf, strict) {
     return new this().fromDer(buf, strict);
-  }
+  } // The format used in a tx
+
 
   fromTxFormat(buf) {
     if (buf.length === 0) {
+      // allow setting a "blank" signature
       this.r = new Bn(1);
       this.s = new Bn(1);
       this.nHashType = 1;
@@ -2423,6 +2826,10 @@ class Sig extends Struct {
   fromString(str) {
     return this.fromHex(str);
   }
+  /**
+     * In order to mimic the non-strict DER encoding of OpenSSL, set strict = false.
+     */
+
 
   static parseDer(buf, strict) {
     if (strict === undefined) {
@@ -2500,74 +2907,107 @@ class Sig extends Struct {
     };
     return obj;
   }
+  /**
+     * This function is translated from bitcoind's IsDERSignature and is used in
+     * the script interpreter.  This "DER" format actually includes an extra byte,
+     * the nHashType, at the end. It is really the tx format, not DER format.
+     *
+     * A canonical signature exists of: [30] [total len] [02] [len R] [R] [02] [len S] [S] [hashtype]
+     * Where R and S are not negative (their first byte has its highest bit not set), and not
+     * excessively padded (do not start with a 0 byte, unless an otherwise negative number follows,
+     * in which case a single 0 byte is necessary and even required).
+     *
+     * See https://bitcointalk.org/index.php?topic=8392.msg127623#msg127623
+     */
+
 
   static IsTxDer(buf) {
     if (buf.length < 9) {
+      //  Non-canonical signature: too short
       return false;
     }
 
     if (buf.length > 73) {
+      // Non-canonical signature: too long
       return false;
     }
 
     if (buf[0] !== 0x30) {
+      //  Non-canonical signature: wrong type
       return false;
     }
 
     if (buf[1] !== buf.length - 3) {
+      //  Non-canonical signature: wrong length marker
       return false;
     }
 
     const nLEnR = buf[3];
 
     if (5 + nLEnR >= buf.length) {
+      //  Non-canonical signature: S length misplaced
       return false;
     }
 
     const nLEnS = buf[5 + nLEnR];
 
     if (nLEnR + nLEnS + 7 !== buf.length) {
+      //  Non-canonical signature: R+S length mismatch
       return false;
     }
 
     const R = buf.slice(4);
 
     if (buf[4 - 2] !== 0x02) {
+      //  Non-canonical signature: R value type mismatch
       return false;
     }
 
     if (nLEnR === 0) {
+      //  Non-canonical signature: R length is zero
       return false;
     }
 
     if (R[0] & 0x80) {
+      //  Non-canonical signature: R value negative
       return false;
     }
 
     if (nLEnR > 1 && R[0] === 0x00 && !(R[1] & 0x80)) {
+      //  Non-canonical signature: R value excessively padded
       return false;
     }
 
     const S = buf.slice(6 + nLEnR);
 
     if (buf[6 + nLEnR - 2] !== 0x02) {
+      //  Non-canonical signature: S value type mismatch
       return false;
     }
 
     if (nLEnS === 0) {
+      //  Non-canonical signature: S length is zero
       return false;
     }
 
     if (S[0] & 0x80) {
+      //  Non-canonical signature: S value negative
       return false;
     }
 
     if (nLEnS > 1 && S[0] === 0x00 && !(S[1] & 0x80)) {
+      //  Non-canonical signature: S value excessively padded
       return false;
     }
 
     return true;
   }
+  /**
+     * Compares to bitcoind's IsLowDERSignature
+     * See also Ecdsa signature algorithm which enforces this.
+     * See also Bip 62, "low S values in signatures"
+     */
+
 
   hasLowS() {
     if (this.s.lt(1) || this.s.gt(Bn.fromBuffer(Buffer.from('7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0', 'hex')))) {
@@ -2576,6 +3016,11 @@ class Sig extends Struct {
 
     return true;
   }
+  /**
+     * Ensures the nHashType is exactly equal to one of the standard options or combinations thereof.
+     * Translated from bitcoind's IsDefinedHashtypeSignature
+     */
+
 
   hasDefinedHashType() {
     if (this.nHashType < Sig.SIGHASH_ALL || this.nHashType > Sig.SIGHASH_SINGLE) {
@@ -2652,6 +3097,22 @@ Sig.SIGHASH_NONE = 0x00000002;
 Sig.SIGHASH_SINGLE = 0x00000003;
 Sig.SIGHASH_FORKID = 0x00000040;
 Sig.SIGHASH_ANYONECANPAY = 0x00000080;
+
+/*
+ * Script
+ * ======
+ *
+ * Script is the scripting language built into bitcoin. The Script class lets
+ * you create an instance of a script, e.g. for a scriptSig or a scriptPubKey.
+ * It understands both the binary format, as well as two different string
+ * formats. The default string format, to/fromString, is a custom format only
+ * used by Yours Bitcoin because it is isomorphic to the binary format (or as
+ * isomorphic as it can be ... since OP_0 and OP_FALSE have the same byte
+ * value, and so do OP_1 and OP_TRUE). The bitcoind string format is also
+ * support, but that format is not isomorphic (i.e., if you pull in a string
+ * and then write it again, you are likely to get back a different string, even
+ * if you don't use OP_0, OP_FALSE, OP_1, or OP_TRUE).
+ */
 
 class Script extends Struct {
   constructor(chunks = []) {
@@ -2845,6 +3306,10 @@ class Script extends Struct {
 
     return str.substr(1);
   }
+  /**
+     * Input the script from the script string format used in bitcoind data tests
+     */
+
 
   fromBitcoindString(str) {
     const bw = new Bw();
@@ -2891,6 +3356,10 @@ class Script extends Struct {
   static fromBitcoindString(str) {
     return new this().fromBitcoindString(str);
   }
+  /**
+     * Output the script to the script string format used in bitcoind data tests.
+     */
+
 
   toBitcoindString() {
     let str = '';
@@ -2904,7 +3373,7 @@ class Script extends Struct {
         str = str + ' ' + '0x' + hex;
       } else if (OpCode.str[chunk.opCodeNum] !== undefined) {
         const ostr = new OpCode(chunk.opCodeNum).toString();
-        str = str + ' ' + ostr.slice(3);
+        str = str + ' ' + ostr.slice(3); // remove OP_
       } else {
         str = str + ' ' + '0x' + chunk.opCodeNum.toString(16);
       }
@@ -2912,6 +3381,10 @@ class Script extends Struct {
 
     return str.substr(1);
   }
+  /**
+     * Input the script from the script string format used in bitcoind data tests
+     */
+
 
   fromAsmString(str) {
     this.chunks = [];
@@ -2928,7 +3401,9 @@ class Script extends Struct {
       } catch (err) {
         opCode = undefined;
         opCodeNum = undefined;
-      }
+      } // we start with two special cases, 0 and -1, which are handled specially in
+      // toASM. see _chunkToString.
+
 
       if (token === '0') {
         opCodeNum = 0;
@@ -2982,6 +3457,10 @@ class Script extends Struct {
   static fromAsmString(str) {
     return new this().fromAsmString(str);
   }
+  /**
+     * Output the script to the script string format used in bitcoind data tests.
+     */
+
 
   toAsmString() {
     var str = '';
@@ -2999,10 +3478,15 @@ class Script extends Struct {
     var str = '';
 
     if (!chunk.buf) {
+      // no data chunk
       if (typeof OpCode.str[opCodeNum] !== 'undefined') {
+        // A few cases where the opcode name differs from reverseMap
+        // aside from 1 to 16 data pushes.
         if (opCodeNum === 0) {
+          // OP_0 -> 0
           str = str + ' 0';
         } else if (opCodeNum === 79) {
+          // OP_1NEGATE -> 1
           str = str + ' -1';
         } else {
           str = str + ' ' + new OpCode(opCodeNum).toString();
@@ -3017,6 +3501,7 @@ class Script extends Struct {
         str = str + ' ' + numstr;
       }
     } else {
+      // data chunk
       if (chunk.len > 0) {
         str = str + ' ' + chunk.buf.toString('hex');
       }
@@ -3077,6 +3562,10 @@ class Script extends Struct {
 
     throw new Error('Unrecognized script type to get data from');
   }
+  /**
+     * Turn script into a standard pubKeyHash output script
+     */
+
 
   fromPubKeyHash(hashBuf) {
     if (hashBuf.length !== 20) {
@@ -3103,7 +3592,7 @@ class Script extends Struct {
 
       for (let i = 0; i <= len; i++) {
         if (buf1[i] === undefined) {
-          return -1;
+          return -1; // shorter strings come first
         }
 
         if (buf2[i] === undefined) {
@@ -3122,6 +3611,12 @@ class Script extends Struct {
       }
     });
   }
+  /**
+     * Generate a multisig output script from a list of public keys. sort
+     * defaults to true. If sort is true, the pubKeys are sorted
+     * lexicographically.
+     */
+
 
   fromPubKeys(m, pubKeys, sort = true) {
     if (typeof m !== 'number') {
@@ -3202,6 +3697,12 @@ class Script extends Struct {
       return false;
     }
   }
+  /**
+     * A pubKeyHash input should consist of two push operations. The first push
+     * operation may be OP_0, which means the signature is missing, which is true
+     * for some partially signed (and invalid) transactions.
+     */
+
 
   isPubKeyHashIn() {
     if (this.chunks.length === 2 && (this.chunks[0].buf || this.chunks[0].opCodeNum === OpCode.OP_0) && (this.chunks[1].buf || this.chunks[0].opCodeNum === OpCode.OP_0)) {
@@ -3215,6 +3716,10 @@ class Script extends Struct {
     const buf = this.toBuffer();
     return buf.length === 23 && buf[0] === OpCode.OP_HASH160 && buf[1] === 0x14 && buf[22] === OpCode.OP_EQUAL;
   }
+  /**
+     * Note that these are frequently indistinguishable from pubKeyHashin
+     */
+
 
   isScriptHashIn() {
     if (!this.isPushOnly()) {
@@ -3278,6 +3783,15 @@ class Script extends Struct {
 
     return remaining.every(chunk => Buffer.isBuffer(chunk.buf) && Sig.IsTxDer(chunk.buf));
   }
+  /**
+     * Analagous to bitcoind's FindAndDelete Find and deconste equivalent chunks,
+     * typically used with push data chunks.  Note that this will find and deconste
+     * not just the same data, but the same data with the same push data op as
+     * produced by default. i.e., if a pushdata in a tx does not use the minimal
+     * pushdata op, then when you try to remove the data it is pushing, it will not
+     * be removed, because they do not use the same pushdata op.
+     */
+
 
   findAndDelete(script) {
     const buf = script.toBuffer();
@@ -3329,7 +3843,8 @@ class Script extends Struct {
       opCodeNum
     };
     return this;
-  }
+  } // write a big number in the minimal way
+
 
   writeBn(bn) {
     if (bn.cmp(0) === OpCode.OP_0) {
@@ -3341,6 +3856,7 @@ class Script extends Struct {
         opCodeNum: OpCode.OP_1NEGATE
       });
     } else if (bn.cmp(1) >= 0 && bn.cmp(16) <= 0) {
+      // see OP_1 - OP_16
       this.chunks.push({
         opCodeNum: bn.toNumber() + OpCode.OP_1 - 1
       });
@@ -3370,7 +3886,9 @@ class Script extends Struct {
   setChunkBn(i, bn) {
     this.chunks[i] = new Script().writeBn(bn).chunks[0];
     return this;
-  }
+  } // note: this does not necessarily write buffers in the minimal way
+  // to write numbers in the minimal way, see writeBn
+
 
   writeBuffer(buf) {
     let opCodeNum;
@@ -3405,7 +3923,9 @@ class Script extends Struct {
   setChunkBuffer(i, buf) {
     this.chunks[i] = new Script().writeBuffer(buf).chunks[0];
     return this;
-  }
+  } // make sure a push is the smallest way to push that particular data
+  // comes from bitcoind's script interpreter CheckMinimalPush function
+
 
   checkMinimalPush(i) {
     const chunk = this.chunks[i];
@@ -3417,16 +3937,22 @@ class Script extends Struct {
     }
 
     if (buf.length === 0) {
+      // Could have used OP_0.
       return opCodeNum === OpCode.OP_0;
     } else if (buf.length === 1 && buf[0] >= 1 && buf[0] <= 16) {
+      // Could have used OP_1 .. OP_16.
       return opCodeNum === OpCode.OP_1 + (buf[0] - 1);
     } else if (buf.length === 1 && buf[0] === 0x81) {
+      // Could have used OP_1NEGATE.
       return opCodeNum === OpCode.OP_1NEGATE;
     } else if (buf.length <= 75) {
+      // Could have used a direct push (opCode indicating number of bytes pushed + those bytes).
       return opCodeNum === buf.length;
     } else if (buf.length <= 255) {
+      // Could have used OP_PUSHDATA.
       return opCodeNum === OpCode.OP_PUSHDATA1;
     } else if (buf.length <= 65535) {
+      // Could have used OP_PUSHDATA2.
       return opCodeNum === OpCode.OP_PUSHDATA2;
     }
 
@@ -3434,6 +3960,25 @@ class Script extends Struct {
   }
 
 }
+
+/**
+ * Bitcoin Address
+ * ===============
+ *
+ * A bitcoin address. Normal use cases:
+ * const address = new Address().fromPubKey(pubKey)
+ * const address = new Address().fromString(string)
+ * const string = address.toString()
+ * const script = address.toTxOutScript()
+ * const isValid = Address.isValid(string)
+ *
+ * Can also do testnet:
+ * const address = Address.Testnet()
+ *
+ * Note that an Address and an Addr are two completely different things. An
+ * Address is what you send bitcoin to. An Addr is an ip address and port that
+ * you connect to over the internet.
+ */
 
 class Address extends Struct {
   constructor(versionByteNum, hashBuf, constants = null) {
@@ -3659,6 +4204,24 @@ Address.Testnet = class extends Address {
 
 };
 
+/**
+ * Bip32: HD Wallets
+ * =================
+ *
+ * Bip32 is hierarchical deterministic wallets. The standard way to use this is:
+ * const bip32 = new Bip32().fromRandom()
+ * const bip32 = new Bip32().fromSeed(buf)
+ * const bip32 = new Bip32().fromString(string)
+ * const xprv = bip32.toString()
+ * const xpub = bip32.toPublic().toString()
+ *
+ * This code was originally copied from here:
+ *
+ * https://github.com/sarchar/brainwallet.github.com
+ *
+ * It has faced mostly cosmetic alterations since it was copied.
+ */
+
 class Bip32 extends Struct {
   constructor(versionBytesNum, depth, parentFingerPrint, childIndex, chainCode, privKey, pubKey, constants = null, PrivKey$1 = PrivKey) {
     super({
@@ -3693,6 +4256,11 @@ class Bip32 extends Struct {
   fromString(str) {
     return this.fromBuffer(Base58Check.decode(str));
   }
+  /**
+   * Use workers to convert a bip32 string into a bip32 object without
+   * blocking.
+   */
+
 
   async asyncFromString(str) {
     const args = [str];
@@ -3738,6 +4306,7 @@ class Bip32 extends Struct {
   }
 
   fromBuffer(buf) {
+    // Both pub and private extended keys are 78 buf
     if (buf.length !== 78) {
       throw new Error('incorrect bip32 data length');
     }
@@ -3762,6 +4331,18 @@ class Bip32 extends Struct {
 
     return this;
   }
+  /**
+   * This is a faster version of .fromBuffer that reads in the output from
+   * .toFastBuffer rather than from .toBuffer. .toFastBuffer outputs almost the
+   * same thing as .toBuffer, except the public key is uncompressed. That makes
+   * it larger, but also means that point multiplication doesn't have to be
+   * used to derive the y value. So reading it in is faster. The only thing we
+   * have to do is explicitely set the "compressed" value of public key to true
+   * after reading it in. That is because although .toFastBuffer and
+   * .fromFastBuffer transmit the public key in uncompressed form, we want it
+   * to be set to compressed when stored in memory.
+   */
+
 
   fromFastBuffer(buf) {
     if (buf.length === 0) {
@@ -3870,7 +4451,8 @@ class Bip32 extends Struct {
       const il = Bn().fromBuffer(hash.slice(0, 32), {
         size: 32
       });
-      const ir = hash.slice(32, 64);
+      const ir = hash.slice(32, 64); // ki = IL + kpar (mod n).
+
       const k = il.add(this.privKey.bn).mod(Point.getN());
       ret = new this.constructor();
       ret.chainCode = ir;
@@ -3880,7 +4462,8 @@ class Bip32 extends Struct {
       const data = Buffer.concat([this.pubKey.toBuffer(), ib]);
       const hash = Hash.sha512Hmac(data, this.chainCode);
       const il = Bn().fromBuffer(hash.slice(0, 32));
-      const ir = hash.slice(32, 64);
+      const ir = hash.slice(32, 64); // Ki = (IL + kpar)*G = IL*G + Kpar
+
       const ilG = Point.getG().mul(il);
       const Kpar = this.pubKey.point;
       const Ki = ilG.add(Kpar);
@@ -3924,6 +4507,15 @@ class Bip32 extends Struct {
       throw new Error('bip32: invalid versionBytesNum byte');
     }
   }
+  /**
+   * This is the "fast" analog of toBuffer. It is almost the same as toBuffer,
+   * and in fact is actually not any faster. The only difference is that it
+   * adds an uncompressed rather than compressed public key to the output. This
+   * is so that .fromFastBufer can read in the public key without having to do
+   * fancy, slow point multiplication to derive the y value of the public key.
+   * Thus, although .toFastBuffer is not any faster, .fromFastBuffer is faster.
+   */
+
 
   toFastBuffer() {
     if (!this.versionBytesNum) {
@@ -3947,6 +4539,11 @@ class Bip32 extends Struct {
   toString() {
     return Base58Check.encode(this.toBuffer());
   }
+  /**
+   * Use workers to convert a bip32 object into a bip32 string without
+   * blocking.
+   */
+
 
   async asyncToString() {
     const workersResult = await Workers.asyncObjectMethod(this, 'toString', []);
@@ -3982,6 +4579,23 @@ Bip32.Testnet = class extends Bip32 {
 
 const wordList = ['abandon', 'ability', 'able', 'about', 'above', 'absent', 'absorb', 'abstract', 'absurd', 'abuse', 'access', 'accident', 'account', 'accuse', 'achieve', 'acid', 'acoustic', 'acquire', 'across', 'act', 'action', 'actor', 'actress', 'actual', 'adapt', 'add', 'addict', 'address', 'adjust', 'admit', 'adult', 'advance', 'advice', 'aerobic', 'affair', 'afford', 'afraid', 'again', 'age', 'agent', 'agree', 'ahead', 'aim', 'air', 'airport', 'aisle', 'alarm', 'album', 'alcohol', 'alert', 'alien', 'all', 'alley', 'allow', 'almost', 'alone', 'alpha', 'already', 'also', 'alter', 'always', 'amateur', 'amazing', 'among', 'amount', 'amused', 'analyst', 'anchor', 'ancient', 'anger', 'angle', 'angry', 'animal', 'ankle', 'announce', 'annual', 'another', 'answer', 'antenna', 'antique', 'anxiety', 'any', 'apart', 'apology', 'appear', 'apple', 'approve', 'april', 'arch', 'arctic', 'area', 'arena', 'argue', 'arm', 'armed', 'armor', 'army', 'around', 'arrange', 'arrest', 'arrive', 'arrow', 'art', 'artefact', 'artist', 'artwork', 'ask', 'aspect', 'assault', 'asset', 'assist', 'assume', 'asthma', 'athlete', 'atom', 'attack', 'attend', 'attitude', 'attract', 'auction', 'audit', 'august', 'aunt', 'author', 'auto', 'autumn', 'average', 'avocado', 'avoid', 'awake', 'aware', 'away', 'awesome', 'awful', 'awkward', 'axis', 'baby', 'bachelor', 'bacon', 'badge', 'bag', 'balance', 'balcony', 'ball', 'bamboo', 'banana', 'banner', 'bar', 'barely', 'bargain', 'barrel', 'base', 'basic', 'basket', 'battle', 'beach', 'bean', 'beauty', 'because', 'become', 'beef', 'before', 'begin', 'behave', 'behind', 'believe', 'below', 'belt', 'bench', 'benefit', 'best', 'betray', 'better', 'between', 'beyond', 'bicycle', 'bid', 'bike', 'bind', 'biology', 'bird', 'birth', 'bitter', 'black', 'blade', 'blame', 'blanket', 'blast', 'bleak', 'bless', 'blind', 'blood', 'blossom', 'blouse', 'blue', 'blur', 'blush', 'board', 'boat', 'body', 'boil', 'bomb', 'bone', 'bonus', 'book', 'boost', 'border', 'boring', 'borrow', 'boss', 'bottom', 'bounce', 'box', 'boy', 'bracket', 'brain', 'brand', 'brass', 'brave', 'bread', 'breeze', 'brick', 'bridge', 'brief', 'bright', 'bring', 'brisk', 'broccoli', 'broken', 'bronze', 'broom', 'brother', 'brown', 'brush', 'bubble', 'buddy', 'budget', 'buffalo', 'build', 'bulb', 'bulk', 'bullet', 'bundle', 'bunker', 'burden', 'burger', 'burst', 'bus', 'business', 'busy', 'butter', 'buyer', 'buzz', 'cabbage', 'cabin', 'cable', 'cactus', 'cage', 'cake', 'call', 'calm', 'camera', 'camp', 'can', 'canal', 'cancel', 'candy', 'cannon', 'canoe', 'canvas', 'canyon', 'capable', 'capital', 'captain', 'car', 'carbon', 'card', 'cargo', 'carpet', 'carry', 'cart', 'case', 'cash', 'casino', 'castle', 'casual', 'cat', 'catalog', 'catch', 'category', 'cattle', 'caught', 'cause', 'caution', 'cave', 'ceiling', 'celery', 'cement', 'census', 'century', 'cereal', 'certain', 'chair', 'chalk', 'champion', 'change', 'chaos', 'chapter', 'charge', 'chase', 'chat', 'cheap', 'check', 'cheese', 'chef', 'cherry', 'chest', 'chicken', 'chief', 'child', 'chimney', 'choice', 'choose', 'chronic', 'chuckle', 'chunk', 'churn', 'cigar', 'cinnamon', 'circle', 'citizen', 'city', 'civil', 'claim', 'clap', 'clarify', 'claw', 'clay', 'clean', 'clerk', 'clever', 'click', 'client', 'cliff', 'climb', 'clinic', 'clip', 'clock', 'clog', 'close', 'cloth', 'cloud', 'clown', 'club', 'clump', 'cluster', 'clutch', 'coach', 'coast', 'coconut', 'code', 'coffee', 'coil', 'coin', 'collect', 'color', 'column', 'combine', 'come', 'comfort', 'comic', 'common', 'company', 'concert', 'conduct', 'confirm', 'congress', 'connect', 'consider', 'control', 'convince', 'cook', 'cool', 'copper', 'copy', 'coral', 'core', 'corn', 'correct', 'cost', 'cotton', 'couch', 'country', 'couple', 'course', 'cousin', 'cover', 'coyote', 'crack', 'cradle', 'craft', 'cram', 'crane', 'crash', 'crater', 'crawl', 'crazy', 'cream', 'credit', 'creek', 'crew', 'cricket', 'crime', 'crisp', 'critic', 'crop', 'cross', 'crouch', 'crowd', 'crucial', 'cruel', 'cruise', 'crumble', 'crunch', 'crush', 'cry', 'crystal', 'cube', 'culture', 'cup', 'cupboard', 'curious', 'current', 'curtain', 'curve', 'cushion', 'custom', 'cute', 'cycle', 'dad', 'damage', 'damp', 'dance', 'danger', 'daring', 'dash', 'daughter', 'dawn', 'day', 'deal', 'debate', 'debris', 'decade', 'december', 'decide', 'decline', 'decorate', 'decrease', 'deer', 'defense', 'define', 'defy', 'degree', 'delay', 'deliver', 'demand', 'demise', 'denial', 'dentist', 'deny', 'depart', 'depend', 'deposit', 'depth', 'deputy', 'derive', 'describe', 'desert', 'design', 'desk', 'despair', 'destroy', 'detail', 'detect', 'develop', 'device', 'devote', 'diagram', 'dial', 'diamond', 'diary', 'dice', 'diesel', 'diet', 'differ', 'digital', 'dignity', 'dilemma', 'dinner', 'dinosaur', 'direct', 'dirt', 'disagree', 'discover', 'disease', 'dish', 'dismiss', 'disorder', 'display', 'distance', 'divert', 'divide', 'divorce', 'dizzy', 'doctor', 'document', 'dog', 'doll', 'dolphin', 'domain', 'donate', 'donkey', 'donor', 'door', 'dose', 'double', 'dove', 'draft', 'dragon', 'drama', 'drastic', 'draw', 'dream', 'dress', 'drift', 'drill', 'drink', 'drip', 'drive', 'drop', 'drum', 'dry', 'duck', 'dumb', 'dune', 'during', 'dust', 'dutch', 'duty', 'dwarf', 'dynamic', 'eager', 'eagle', 'early', 'earn', 'earth', 'easily', 'east', 'easy', 'echo', 'ecology', 'economy', 'edge', 'edit', 'educate', 'effort', 'egg', 'eight', 'either', 'elbow', 'elder', 'electric', 'elegant', 'element', 'elephant', 'elevator', 'elite', 'else', 'embark', 'embody', 'embrace', 'emerge', 'emotion', 'employ', 'empower', 'empty', 'enable', 'enact', 'end', 'endless', 'endorse', 'enemy', 'energy', 'enforce', 'engage', 'engine', 'enhance', 'enjoy', 'enlist', 'enough', 'enrich', 'enroll', 'ensure', 'enter', 'entire', 'entry', 'envelope', 'episode', 'equal', 'equip', 'era', 'erase', 'erode', 'erosion', 'error', 'erupt', 'escape', 'essay', 'essence', 'estate', 'eternal', 'ethics', 'evidence', 'evil', 'evoke', 'evolve', 'exact', 'example', 'excess', 'exchange', 'excite', 'exclude', 'excuse', 'execute', 'exercise', 'exhaust', 'exhibit', 'exile', 'exist', 'exit', 'exotic', 'expand', 'expect', 'expire', 'explain', 'expose', 'express', 'extend', 'extra', 'eye', 'eyebrow', 'fabric', 'face', 'faculty', 'fade', 'faint', 'faith', 'fall', 'false', 'fame', 'family', 'famous', 'fan', 'fancy', 'fantasy', 'farm', 'fashion', 'fat', 'fatal', 'father', 'fatigue', 'fault', 'favorite', 'feature', 'february', 'federal', 'fee', 'feed', 'feel', 'female', 'fence', 'festival', 'fetch', 'fever', 'few', 'fiber', 'fiction', 'field', 'figure', 'file', 'film', 'filter', 'final', 'find', 'fine', 'finger', 'finish', 'fire', 'firm', 'first', 'fiscal', 'fish', 'fit', 'fitness', 'fix', 'flag', 'flame', 'flash', 'flat', 'flavor', 'flee', 'flight', 'flip', 'float', 'flock', 'floor', 'flower', 'fluid', 'flush', 'fly', 'foam', 'focus', 'fog', 'foil', 'fold', 'follow', 'food', 'foot', 'force', 'forest', 'forget', 'fork', 'fortune', 'forum', 'forward', 'fossil', 'foster', 'found', 'fox', 'fragile', 'frame', 'frequent', 'fresh', 'friend', 'fringe', 'frog', 'front', 'frost', 'frown', 'frozen', 'fruit', 'fuel', 'fun', 'funny', 'furnace', 'fury', 'future', 'gadget', 'gain', 'galaxy', 'gallery', 'game', 'gap', 'garage', 'garbage', 'garden', 'garlic', 'garment', 'gas', 'gasp', 'gate', 'gather', 'gauge', 'gaze', 'general', 'genius', 'genre', 'gentle', 'genuine', 'gesture', 'ghost', 'giant', 'gift', 'giggle', 'ginger', 'giraffe', 'girl', 'give', 'glad', 'glance', 'glare', 'glass', 'glide', 'glimpse', 'globe', 'gloom', 'glory', 'glove', 'glow', 'glue', 'goat', 'goddess', 'gold', 'good', 'goose', 'gorilla', 'gospel', 'gossip', 'govern', 'gown', 'grab', 'grace', 'grain', 'grant', 'grape', 'grass', 'gravity', 'great', 'green', 'grid', 'grief', 'grit', 'grocery', 'group', 'grow', 'grunt', 'guard', 'guess', 'guide', 'guilt', 'guitar', 'gun', 'gym', 'habit', 'hair', 'half', 'hammer', 'hamster', 'hand', 'happy', 'harbor', 'hard', 'harsh', 'harvest', 'hat', 'have', 'hawk', 'hazard', 'head', 'health', 'heart', 'heavy', 'hedgehog', 'height', 'hello', 'helmet', 'help', 'hen', 'hero', 'hidden', 'high', 'hill', 'hint', 'hip', 'hire', 'history', 'hobby', 'hockey', 'hold', 'hole', 'holiday', 'hollow', 'home', 'honey', 'hood', 'hope', 'horn', 'horror', 'horse', 'hospital', 'host', 'hotel', 'hour', 'hover', 'hub', 'huge', 'human', 'humble', 'humor', 'hundred', 'hungry', 'hunt', 'hurdle', 'hurry', 'hurt', 'husband', 'hybrid', 'ice', 'icon', 'idea', 'identify', 'idle', 'ignore', 'ill', 'illegal', 'illness', 'image', 'imitate', 'immense', 'immune', 'impact', 'impose', 'improve', 'impulse', 'inch', 'include', 'income', 'increase', 'index', 'indicate', 'indoor', 'industry', 'infant', 'inflict', 'inform', 'inhale', 'inherit', 'initial', 'inject', 'injury', 'inmate', 'inner', 'innocent', 'input', 'inquiry', 'insane', 'insect', 'inside', 'inspire', 'install', 'intact', 'interest', 'into', 'invest', 'invite', 'involve', 'iron', 'island', 'isolate', 'issue', 'item', 'ivory', 'jacket', 'jaguar', 'jar', 'jazz', 'jealous', 'jeans', 'jelly', 'jewel', 'job', 'join', 'joke', 'journey', 'joy', 'judge', 'juice', 'jump', 'jungle', 'junior', 'junk', 'just', 'kangaroo', 'keen', 'keep', 'ketchup', 'key', 'kick', 'kid', 'kidney', 'kind', 'kingdom', 'kiss', 'kit', 'kitchen', 'kite', 'kitten', 'kiwi', 'knee', 'knife', 'knock', 'know', 'lab', 'label', 'labor', 'ladder', 'lady', 'lake', 'lamp', 'language', 'laptop', 'large', 'later', 'latin', 'laugh', 'laundry', 'lava', 'law', 'lawn', 'lawsuit', 'layer', 'lazy', 'leader', 'leaf', 'learn', 'leave', 'lecture', 'left', 'leg', 'legal', 'legend', 'leisure', 'lemon', 'lend', 'length', 'lens', 'leopard', 'lesson', 'letter', 'level', 'liar', 'liberty', 'library', 'license', 'life', 'lift', 'light', 'like', 'limb', 'limit', 'link', 'lion', 'liquid', 'list', 'little', 'live', 'lizard', 'load', 'loan', 'lobster', 'local', 'lock', 'logic', 'lonely', 'long', 'loop', 'lottery', 'loud', 'lounge', 'love', 'loyal', 'lucky', 'luggage', 'lumber', 'lunar', 'lunch', 'luxury', 'lyrics', 'machine', 'mad', 'magic', 'magnet', 'maid', 'mail', 'main', 'major', 'make', 'mammal', 'man', 'manage', 'mandate', 'mango', 'mansion', 'manual', 'maple', 'marble', 'march', 'margin', 'marine', 'market', 'marriage', 'mask', 'mass', 'master', 'match', 'material', 'math', 'matrix', 'matter', 'maximum', 'maze', 'meadow', 'mean', 'measure', 'meat', 'mechanic', 'medal', 'media', 'melody', 'melt', 'member', 'memory', 'mention', 'menu', 'mercy', 'merge', 'merit', 'merry', 'mesh', 'message', 'metal', 'method', 'middle', 'midnight', 'milk', 'million', 'mimic', 'mind', 'minimum', 'minor', 'minute', 'miracle', 'mirror', 'misery', 'miss', 'mistake', 'mix', 'mixed', 'mixture', 'mobile', 'model', 'modify', 'mom', 'moment', 'monitor', 'monkey', 'monster', 'month', 'moon', 'moral', 'more', 'morning', 'mosquito', 'mother', 'motion', 'motor', 'mountain', 'mouse', 'move', 'movie', 'much', 'muffin', 'mule', 'multiply', 'muscle', 'museum', 'mushroom', 'music', 'must', 'mutual', 'myself', 'mystery', 'myth', 'naive', 'name', 'napkin', 'narrow', 'nasty', 'nation', 'nature', 'near', 'neck', 'need', 'negative', 'neglect', 'neither', 'nephew', 'nerve', 'nest', 'net', 'network', 'neutral', 'never', 'news', 'next', 'nice', 'night', 'noble', 'noise', 'nominee', 'noodle', 'normal', 'north', 'nose', 'notable', 'note', 'nothing', 'notice', 'novel', 'now', 'nuclear', 'number', 'nurse', 'nut', 'oak', 'obey', 'object', 'oblige', 'obscure', 'observe', 'obtain', 'obvious', 'occur', 'ocean', 'october', 'odor', 'off', 'offer', 'office', 'often', 'oil', 'okay', 'old', 'olive', 'olympic', 'omit', 'once', 'one', 'onion', 'online', 'only', 'open', 'opera', 'opinion', 'oppose', 'option', 'orange', 'orbit', 'orchard', 'order', 'ordinary', 'organ', 'orient', 'original', 'orphan', 'ostrich', 'other', 'outdoor', 'outer', 'output', 'outside', 'oval', 'oven', 'over', 'own', 'owner', 'oxygen', 'oyster', 'ozone', 'pact', 'paddle', 'page', 'pair', 'palace', 'palm', 'panda', 'panel', 'panic', 'panther', 'paper', 'parade', 'parent', 'park', 'parrot', 'party', 'pass', 'patch', 'path', 'patient', 'patrol', 'pattern', 'pause', 'pave', 'payment', 'peace', 'peanut', 'pear', 'peasant', 'pelican', 'pen', 'penalty', 'pencil', 'people', 'pepper', 'perfect', 'permit', 'person', 'pet', 'phone', 'photo', 'phrase', 'physical', 'piano', 'picnic', 'picture', 'piece', 'pig', 'pigeon', 'pill', 'pilot', 'pink', 'pioneer', 'pipe', 'pistol', 'pitch', 'pizza', 'place', 'planet', 'plastic', 'plate', 'play', 'please', 'pledge', 'pluck', 'plug', 'plunge', 'poem', 'poet', 'point', 'polar', 'pole', 'police', 'pond', 'pony', 'pool', 'popular', 'portion', 'position', 'possible', 'post', 'potato', 'pottery', 'poverty', 'powder', 'power', 'practice', 'praise', 'predict', 'prefer', 'prepare', 'present', 'pretty', 'prevent', 'price', 'pride', 'primary', 'print', 'priority', 'prison', 'private', 'prize', 'problem', 'process', 'produce', 'profit', 'program', 'project', 'promote', 'proof', 'property', 'prosper', 'protect', 'proud', 'provide', 'public', 'pudding', 'pull', 'pulp', 'pulse', 'pumpkin', 'punch', 'pupil', 'puppy', 'purchase', 'purity', 'purpose', 'purse', 'push', 'put', 'puzzle', 'pyramid', 'quality', 'quantum', 'quarter', 'question', 'quick', 'quit', 'quiz', 'quote', 'rabbit', 'raccoon', 'race', 'rack', 'radar', 'radio', 'rail', 'rain', 'raise', 'rally', 'ramp', 'ranch', 'random', 'range', 'rapid', 'rare', 'rate', 'rather', 'raven', 'raw', 'razor', 'ready', 'real', 'reason', 'rebel', 'rebuild', 'recall', 'receive', 'recipe', 'record', 'recycle', 'reduce', 'reflect', 'reform', 'refuse', 'region', 'regret', 'regular', 'reject', 'relax', 'release', 'relief', 'rely', 'remain', 'remember', 'remind', 'remove', 'render', 'renew', 'rent', 'reopen', 'repair', 'repeat', 'replace', 'report', 'require', 'rescue', 'resemble', 'resist', 'resource', 'response', 'result', 'retire', 'retreat', 'return', 'reunion', 'reveal', 'review', 'reward', 'rhythm', 'rib', 'ribbon', 'rice', 'rich', 'ride', 'ridge', 'rifle', 'right', 'rigid', 'ring', 'riot', 'ripple', 'risk', 'ritual', 'rival', 'river', 'road', 'roast', 'robot', 'robust', 'rocket', 'romance', 'roof', 'rookie', 'room', 'rose', 'rotate', 'rough', 'round', 'route', 'royal', 'rubber', 'rude', 'rug', 'rule', 'run', 'runway', 'rural', 'sad', 'saddle', 'sadness', 'safe', 'sail', 'salad', 'salmon', 'salon', 'salt', 'salute', 'same', 'sample', 'sand', 'satisfy', 'satoshi', 'sauce', 'sausage', 'save', 'say', 'scale', 'scan', 'scare', 'scatter', 'scene', 'scheme', 'school', 'science', 'scissors', 'scorpion', 'scout', 'scrap', 'screen', 'script', 'scrub', 'sea', 'search', 'season', 'seat', 'second', 'secret', 'section', 'security', 'seed', 'seek', 'segment', 'select', 'sell', 'seminar', 'senior', 'sense', 'sentence', 'series', 'service', 'session', 'settle', 'setup', 'seven', 'shadow', 'shaft', 'shallow', 'share', 'shed', 'shell', 'sheriff', 'shield', 'shift', 'shine', 'ship', 'shiver', 'shock', 'shoe', 'shoot', 'shop', 'short', 'shoulder', 'shove', 'shrimp', 'shrug', 'shuffle', 'shy', 'sibling', 'sick', 'side', 'siege', 'sight', 'sign', 'silent', 'silk', 'silly', 'silver', 'similar', 'simple', 'since', 'sing', 'siren', 'sister', 'situate', 'six', 'size', 'skate', 'sketch', 'ski', 'skill', 'skin', 'skirt', 'skull', 'slab', 'slam', 'sleep', 'slender', 'slice', 'slide', 'slight', 'slim', 'slogan', 'slot', 'slow', 'slush', 'small', 'smart', 'smile', 'smoke', 'smooth', 'snack', 'snake', 'snap', 'sniff', 'snow', 'soap', 'soccer', 'social', 'sock', 'soda', 'soft', 'solar', 'soldier', 'solid', 'solution', 'solve', 'someone', 'song', 'soon', 'sorry', 'sort', 'soul', 'sound', 'soup', 'source', 'south', 'space', 'spare', 'spatial', 'spawn', 'speak', 'special', 'speed', 'spell', 'spend', 'sphere', 'spice', 'spider', 'spike', 'spin', 'spirit', 'split', 'spoil', 'sponsor', 'spoon', 'sport', 'spot', 'spray', 'spread', 'spring', 'spy', 'square', 'squeeze', 'squirrel', 'stable', 'stadium', 'staff', 'stage', 'stairs', 'stamp', 'stand', 'start', 'state', 'stay', 'steak', 'steel', 'stem', 'step', 'stereo', 'stick', 'still', 'sting', 'stock', 'stomach', 'stone', 'stool', 'story', 'stove', 'strategy', 'street', 'strike', 'strong', 'struggle', 'student', 'stuff', 'stumble', 'style', 'subject', 'submit', 'subway', 'success', 'such', 'sudden', 'suffer', 'sugar', 'suggest', 'suit', 'summer', 'sun', 'sunny', 'sunset', 'super', 'supply', 'supreme', 'sure', 'surface', 'surge', 'surprise', 'surround', 'survey', 'suspect', 'sustain', 'swallow', 'swamp', 'swap', 'swarm', 'swear', 'sweet', 'swift', 'swim', 'swing', 'switch', 'sword', 'symbol', 'symptom', 'syrup', 'system', 'table', 'tackle', 'tag', 'tail', 'talent', 'talk', 'tank', 'tape', 'target', 'task', 'taste', 'tattoo', 'taxi', 'teach', 'team', 'tell', 'ten', 'tenant', 'tennis', 'tent', 'term', 'test', 'text', 'thank', 'that', 'theme', 'then', 'theory', 'there', 'they', 'thing', 'this', 'thought', 'three', 'thrive', 'throw', 'thumb', 'thunder', 'ticket', 'tide', 'tiger', 'tilt', 'timber', 'time', 'tiny', 'tip', 'tired', 'tissue', 'title', 'toast', 'tobacco', 'today', 'toddler', 'toe', 'together', 'toilet', 'token', 'tomato', 'tomorrow', 'tone', 'tongue', 'tonight', 'tool', 'tooth', 'top', 'topic', 'topple', 'torch', 'tornado', 'tortoise', 'toss', 'total', 'tourist', 'toward', 'tower', 'town', 'toy', 'track', 'trade', 'traffic', 'tragic', 'train', 'transfer', 'trap', 'trash', 'travel', 'tray', 'treat', 'tree', 'trend', 'trial', 'tribe', 'trick', 'trigger', 'trim', 'trip', 'trophy', 'trouble', 'truck', 'true', 'truly', 'trumpet', 'trust', 'truth', 'try', 'tube', 'tuition', 'tumble', 'tuna', 'tunnel', 'turkey', 'turn', 'turtle', 'twelve', 'twenty', 'twice', 'twin', 'twist', 'two', 'type', 'typical', 'ugly', 'umbrella', 'unable', 'unaware', 'uncle', 'uncover', 'under', 'undo', 'unfair', 'unfold', 'unhappy', 'uniform', 'unique', 'unit', 'universe', 'unknown', 'unlock', 'until', 'unusual', 'unveil', 'update', 'upgrade', 'uphold', 'upon', 'upper', 'upset', 'urban', 'urge', 'usage', 'use', 'used', 'useful', 'useless', 'usual', 'utility', 'vacant', 'vacuum', 'vague', 'valid', 'valley', 'valve', 'van', 'vanish', 'vapor', 'various', 'vast', 'vault', 'vehicle', 'velvet', 'vendor', 'venture', 'venue', 'verb', 'verify', 'version', 'very', 'vessel', 'veteran', 'viable', 'vibrant', 'vicious', 'victory', 'video', 'view', 'village', 'vintage', 'violin', 'virtual', 'virus', 'visa', 'visit', 'visual', 'vital', 'vivid', 'vocal', 'voice', 'void', 'volcano', 'volume', 'vote', 'voyage', 'wage', 'wagon', 'wait', 'walk', 'wall', 'walnut', 'want', 'warfare', 'warm', 'warrior', 'wash', 'wasp', 'waste', 'water', 'wave', 'way', 'wealth', 'weapon', 'wear', 'weasel', 'weather', 'web', 'wedding', 'weekend', 'weird', 'welcome', 'west', 'wet', 'whale', 'what', 'wheat', 'wheel', 'when', 'where', 'whip', 'whisper', 'wide', 'width', 'wife', 'wild', 'will', 'win', 'window', 'wine', 'wing', 'wink', 'winner', 'winter', 'wire', 'wisdom', 'wise', 'wish', 'witness', 'wolf', 'woman', 'wonder', 'wood', 'wool', 'word', 'work', 'world', 'worry', 'worth', 'wrap', 'wreck', 'wrestle', 'wrist', 'write', 'wrong', 'yard', 'year', 'yellow', 'you', 'young', 'youth', 'zebra', 'zero', 'zone', 'zoo'];
 wordList.space = ' ';
+
+/**
+ * Bip39: Mnemonic Seeds
+ * =====================
+ *
+ * Bip39 is a way to turn random entropy into a mnemonic (a string of words
+ * from a wordlist), and then that mnemonic into a seed. The seed can then be
+ * used in Bip32 to derive hierarchical deterministic keys. It does not go the
+ * other way around (i.e., you cannot turn a seed into a mnemonic). The usual
+ * way to use it is either to generate a new one, like this:
+ *
+ * const mnemonic = new Bip39().fromRandom().toString()
+ *
+ * or from a known mnemonic:
+ *
+ * const seed = new Bip39().fromString(mnemonic).toSeed()
+ */
 
 class Bip39 extends Struct {
   constructor(mnemonic, seed, wordlist = wordList) {
@@ -4030,6 +4644,10 @@ class Bip39 extends Struct {
 
     return this;
   }
+  /**
+     * Generate a random new mnemonic from the wordlist.
+     */
+
 
   fromRandom(bits) {
     if (!bits) {
@@ -4111,6 +4729,11 @@ class Bip39 extends Struct {
     const workersResult = await Workers.asyncObjectMethod(this, 'toSeed', args);
     return workersResult.resbuf;
   }
+  /**
+     * Generate a new mnemonic from some entropy generated somewhere else. The
+     * entropy must be at least 128 bits.
+     */
+
 
   entropy2Mnemonic(buf) {
     if (!Buffer.isBuffer(buf) || buf.length < 128 / 8) {
@@ -4147,9 +4770,15 @@ class Bip39 extends Struct {
     this.mnemonic = mnemonic;
     return this;
   }
+  /**
+     * Check that a mnemonic is valid. This means there should be no superfluous
+     * whitespace, no invalid words, and the checksum should match.
+     */
+
 
   check() {
-    const mnemonic = this.mnemonic;
+    const mnemonic = this.mnemonic; // confirm no invalid words
+
     const words = mnemonic.split(this.Wordlist.space);
     let bin = '';
 
@@ -4165,7 +4794,8 @@ class Bip39 extends Struct {
 
     if (bin.length % 11 !== 0) {
       throw new Error('internal error - entropy not an even multiple of 11 bits - ' + bin.length);
-    }
+    } // confirm checksum
+
 
     const cs = bin.length / 33;
     const hashBits = bin.slice(-cs);
@@ -4181,6 +4811,11 @@ class Bip39 extends Struct {
     expectedHashBits = ('00000000' + expectedHashBits).slice(-8).slice(0, cs);
     return expectedHashBits === hashBits;
   }
+  /**
+     * Convert a mnemonic to a seed. Does not check for validity of the mnemonic -
+     * for that, you should manually run check() first.
+     */
+
 
   mnemonic2Seed(passphrase = '') {
     let mnemonic = this.mnemonic;
@@ -4221,6 +4856,17 @@ class Bip39 extends Struct {
 
 const wordList$1 = ['あいこくしん', 'あいさつ', 'あいだ', 'あおぞら', 'あかちゃん', 'あきる', 'あけがた', 'あける', 'あこがれる', 'あさい', 'あさひ', 'あしあと', 'あじわう', 'あずかる', 'あずき', 'あそぶ', 'あたえる', 'あたためる', 'あたりまえ', 'あたる', 'あつい', 'あつかう', 'あっしゅく', 'あつまり', 'あつめる', 'あてな', 'あてはまる', 'あひる', 'あぶら', 'あぶる', 'あふれる', 'あまい', 'あまど', 'あまやかす', 'あまり', 'あみもの', 'あめりか', 'あやまる', 'あゆむ', 'あらいぐま', 'あらし', 'あらすじ', 'あらためる', 'あらゆる', 'あらわす', 'ありがとう', 'あわせる', 'あわてる', 'あんい', 'あんがい', 'あんこ', 'あんぜん', 'あんてい', 'あんない', 'あんまり', 'いいだす', 'いおん', 'いがい', 'いがく', 'いきおい', 'いきなり', 'いきもの', 'いきる', 'いくじ', 'いくぶん', 'いけばな', 'いけん', 'いこう', 'いこく', 'いこつ', 'いさましい', 'いさん', 'いしき', 'いじゅう', 'いじょう', 'いじわる', 'いずみ', 'いずれ', 'いせい', 'いせえび', 'いせかい', 'いせき', 'いぜん', 'いそうろう', 'いそがしい', 'いだい', 'いだく', 'いたずら', 'いたみ', 'いたりあ', 'いちおう', 'いちじ', 'いちど', 'いちば', 'いちぶ', 'いちりゅう', 'いつか', 'いっしゅん', 'いっせい', 'いっそう', 'いったん', 'いっち', 'いってい', 'いっぽう', 'いてざ', 'いてん', 'いどう', 'いとこ', 'いない', 'いなか', 'いねむり', 'いのち', 'いのる', 'いはつ', 'いばる', 'いはん', 'いびき', 'いひん', 'いふく', 'いへん', 'いほう', 'いみん', 'いもうと', 'いもたれ', 'いもり', 'いやがる', 'いやす', 'いよかん', 'いよく', 'いらい', 'いらすと', 'いりぐち', 'いりょう', 'いれい', 'いれもの', 'いれる', 'いろえんぴつ', 'いわい', 'いわう', 'いわかん', 'いわば', 'いわゆる', 'いんげんまめ', 'いんさつ', 'いんしょう', 'いんよう', 'うえき', 'うえる', 'うおざ', 'うがい', 'うかぶ', 'うかべる', 'うきわ', 'うくらいな', 'うくれれ', 'うけたまわる', 'うけつけ', 'うけとる', 'うけもつ', 'うける', 'うごかす', 'うごく', 'うこん', 'うさぎ', 'うしなう', 'うしろがみ', 'うすい', 'うすぎ', 'うすぐらい', 'うすめる', 'うせつ', 'うちあわせ', 'うちがわ', 'うちき', 'うちゅう', 'うっかり', 'うつくしい', 'うったえる', 'うつる', 'うどん', 'うなぎ', 'うなじ', 'うなずく', 'うなる', 'うねる', 'うのう', 'うぶげ', 'うぶごえ', 'うまれる', 'うめる', 'うもう', 'うやまう', 'うよく', 'うらがえす', 'うらぐち', 'うらない', 'うりあげ', 'うりきれ', 'うるさい', 'うれしい', 'うれゆき', 'うれる', 'うろこ', 'うわき', 'うわさ', 'うんこう', 'うんちん', 'うんてん', 'うんどう', 'えいえん', 'えいが', 'えいきょう', 'えいご', 'えいせい', 'えいぶん', 'えいよう', 'えいわ', 'えおり', 'えがお', 'えがく', 'えきたい', 'えくせる', 'えしゃく', 'えすて', 'えつらん', 'えのぐ', 'えほうまき', 'えほん', 'えまき', 'えもじ', 'えもの', 'えらい', 'えらぶ', 'えりあ', 'えんえん', 'えんかい', 'えんぎ', 'えんげき', 'えんしゅう', 'えんぜつ', 'えんそく', 'えんちょう', 'えんとつ', 'おいかける', 'おいこす', 'おいしい', 'おいつく', 'おうえん', 'おうさま', 'おうじ', 'おうせつ', 'おうたい', 'おうふく', 'おうべい', 'おうよう', 'おえる', 'おおい', 'おおう', 'おおどおり', 'おおや', 'おおよそ', 'おかえり', 'おかず', 'おがむ', 'おかわり', 'おぎなう', 'おきる', 'おくさま', 'おくじょう', 'おくりがな', 'おくる', 'おくれる', 'おこす', 'おこなう', 'おこる', 'おさえる', 'おさない', 'おさめる', 'おしいれ', 'おしえる', 'おじぎ', 'おじさん', 'おしゃれ', 'おそらく', 'おそわる', 'おたがい', 'おたく', 'おだやか', 'おちつく', 'おっと', 'おつり', 'おでかけ', 'おとしもの', 'おとなしい', 'おどり', 'おどろかす', 'おばさん', 'おまいり', 'おめでとう', 'おもいで', 'おもう', 'おもたい', 'おもちゃ', 'おやつ', 'おやゆび', 'およぼす', 'おらんだ', 'おろす', 'おんがく', 'おんけい', 'おんしゃ', 'おんせん', 'おんだん', 'おんちゅう', 'おんどけい', 'かあつ', 'かいが', 'がいき', 'がいけん', 'がいこう', 'かいさつ', 'かいしゃ', 'かいすいよく', 'かいぜん', 'かいぞうど', 'かいつう', 'かいてん', 'かいとう', 'かいふく', 'がいへき', 'かいほう', 'かいよう', 'がいらい', 'かいわ', 'かえる', 'かおり', 'かかえる', 'かがく', 'かがし', 'かがみ', 'かくご', 'かくとく', 'かざる', 'がぞう', 'かたい', 'かたち', 'がちょう', 'がっきゅう', 'がっこう', 'がっさん', 'がっしょう', 'かなざわし', 'かのう', 'がはく', 'かぶか', 'かほう', 'かほご', 'かまう', 'かまぼこ', 'かめれおん', 'かゆい', 'かようび', 'からい', 'かるい', 'かろう', 'かわく', 'かわら', 'がんか', 'かんけい', 'かんこう', 'かんしゃ', 'かんそう', 'かんたん', 'かんち', 'がんばる', 'きあい', 'きあつ', 'きいろ', 'ぎいん', 'きうい', 'きうん', 'きえる', 'きおう', 'きおく', 'きおち', 'きおん', 'きかい', 'きかく', 'きかんしゃ', 'ききて', 'きくばり', 'きくらげ', 'きけんせい', 'きこう', 'きこえる', 'きこく', 'きさい', 'きさく', 'きさま', 'きさらぎ', 'ぎじかがく', 'ぎしき', 'ぎじたいけん', 'ぎじにってい', 'ぎじゅつしゃ', 'きすう', 'きせい', 'きせき', 'きせつ', 'きそう', 'きぞく', 'きぞん', 'きたえる', 'きちょう', 'きつえん', 'ぎっちり', 'きつつき', 'きつね', 'きてい', 'きどう', 'きどく', 'きない', 'きなが', 'きなこ', 'きぬごし', 'きねん', 'きのう', 'きのした', 'きはく', 'きびしい', 'きひん', 'きふく', 'きぶん', 'きぼう', 'きほん', 'きまる', 'きみつ', 'きむずかしい', 'きめる', 'きもだめし', 'きもち', 'きもの', 'きゃく', 'きやく', 'ぎゅうにく', 'きよう', 'きょうりゅう', 'きらい', 'きらく', 'きりん', 'きれい', 'きれつ', 'きろく', 'ぎろん', 'きわめる', 'ぎんいろ', 'きんかくじ', 'きんじょ', 'きんようび', 'ぐあい', 'くいず', 'くうかん', 'くうき', 'くうぐん', 'くうこう', 'ぐうせい', 'くうそう', 'ぐうたら', 'くうふく', 'くうぼ', 'くかん', 'くきょう', 'くげん', 'ぐこう', 'くさい', 'くさき', 'くさばな', 'くさる', 'くしゃみ', 'くしょう', 'くすのき', 'くすりゆび', 'くせげ', 'くせん', 'ぐたいてき', 'くださる', 'くたびれる', 'くちこみ', 'くちさき', 'くつした', 'ぐっすり', 'くつろぐ', 'くとうてん', 'くどく', 'くなん', 'くねくね', 'くのう', 'くふう', 'くみあわせ', 'くみたてる', 'くめる', 'くやくしょ', 'くらす', 'くらべる', 'くるま', 'くれる', 'くろう', 'くわしい', 'ぐんかん', 'ぐんしょく', 'ぐんたい', 'ぐんて', 'けあな', 'けいかく', 'けいけん', 'けいこ', 'けいさつ', 'げいじゅつ', 'けいたい', 'げいのうじん', 'けいれき', 'けいろ', 'けおとす', 'けおりもの', 'げきか', 'げきげん', 'げきだん', 'げきちん', 'げきとつ', 'げきは', 'げきやく', 'げこう', 'げこくじょう', 'げざい', 'けさき', 'げざん', 'けしき', 'けしごむ', 'けしょう', 'げすと', 'けたば', 'けちゃっぷ', 'けちらす', 'けつあつ', 'けつい', 'けつえき', 'けっこん', 'けつじょ', 'けっせき', 'けってい', 'けつまつ', 'げつようび', 'げつれい', 'けつろん', 'げどく', 'けとばす', 'けとる', 'けなげ', 'けなす', 'けなみ', 'けぬき', 'げねつ', 'けねん', 'けはい', 'げひん', 'けぶかい', 'げぼく', 'けまり', 'けみかる', 'けむし', 'けむり', 'けもの', 'けらい', 'けろけろ', 'けわしい', 'けんい', 'けんえつ', 'けんお', 'けんか', 'げんき', 'けんげん', 'けんこう', 'けんさく', 'けんしゅう', 'けんすう', 'げんそう', 'けんちく', 'けんてい', 'けんとう', 'けんない', 'けんにん', 'げんぶつ', 'けんま', 'けんみん', 'けんめい', 'けんらん', 'けんり', 'こあくま', 'こいぬ', 'こいびと', 'ごうい', 'こうえん', 'こうおん', 'こうかん', 'ごうきゅう', 'ごうけい', 'こうこう', 'こうさい', 'こうじ', 'こうすい', 'ごうせい', 'こうそく', 'こうたい', 'こうちゃ', 'こうつう', 'こうてい', 'こうどう', 'こうない', 'こうはい', 'ごうほう', 'ごうまん', 'こうもく', 'こうりつ', 'こえる', 'こおり', 'ごかい', 'ごがつ', 'ごかん', 'こくご', 'こくさい', 'こくとう', 'こくない', 'こくはく', 'こぐま', 'こけい', 'こける', 'ここのか', 'こころ', 'こさめ', 'こしつ', 'こすう', 'こせい', 'こせき', 'こぜん', 'こそだて', 'こたい', 'こたえる', 'こたつ', 'こちょう', 'こっか', 'こつこつ', 'こつばん', 'こつぶ', 'こてい', 'こてん', 'ことがら', 'ことし', 'ことば', 'ことり', 'こなごな', 'こねこね', 'このまま', 'このみ', 'このよ', 'ごはん', 'こひつじ', 'こふう', 'こふん', 'こぼれる', 'ごまあぶら', 'こまかい', 'ごますり', 'こまつな', 'こまる', 'こむぎこ', 'こもじ', 'こもち', 'こもの', 'こもん', 'こやく', 'こやま', 'こゆう', 'こゆび', 'こよい', 'こよう', 'こりる', 'これくしょん', 'ころっけ', 'こわもて', 'こわれる', 'こんいん', 'こんかい', 'こんき', 'こんしゅう', 'こんすい', 'こんだて', 'こんとん', 'こんなん', 'こんびに', 'こんぽん', 'こんまけ', 'こんや', 'こんれい', 'こんわく', 'ざいえき', 'さいかい', 'さいきん', 'ざいげん', 'ざいこ', 'さいしょ', 'さいせい', 'ざいたく', 'ざいちゅう', 'さいてき', 'ざいりょう', 'さうな', 'さかいし', 'さがす', 'さかな', 'さかみち', 'さがる', 'さぎょう', 'さくし', 'さくひん', 'さくら', 'さこく', 'さこつ', 'さずかる', 'ざせき', 'さたん', 'さつえい', 'ざつおん', 'ざっか', 'ざつがく', 'さっきょく', 'ざっし', 'さつじん', 'ざっそう', 'さつたば', 'さつまいも', 'さてい', 'さといも', 'さとう', 'さとおや', 'さとし', 'さとる', 'さのう', 'さばく', 'さびしい', 'さべつ', 'さほう', 'さほど', 'さます', 'さみしい', 'さみだれ', 'さむけ', 'さめる', 'さやえんどう', 'さゆう', 'さよう', 'さよく', 'さらだ', 'ざるそば', 'さわやか', 'さわる', 'さんいん', 'さんか', 'さんきゃく', 'さんこう', 'さんさい', 'ざんしょ', 'さんすう', 'さんせい', 'さんそ', 'さんち', 'さんま', 'さんみ', 'さんらん', 'しあい', 'しあげ', 'しあさって', 'しあわせ', 'しいく', 'しいん', 'しうち', 'しえい', 'しおけ', 'しかい', 'しかく', 'じかん', 'しごと', 'しすう', 'じだい', 'したうけ', 'したぎ', 'したて', 'したみ', 'しちょう', 'しちりん', 'しっかり', 'しつじ', 'しつもん', 'してい', 'してき', 'してつ', 'じてん', 'じどう', 'しなぎれ', 'しなもの', 'しなん', 'しねま', 'しねん', 'しのぐ', 'しのぶ', 'しはい', 'しばかり', 'しはつ', 'しはらい', 'しはん', 'しひょう', 'しふく', 'じぶん', 'しへい', 'しほう', 'しほん', 'しまう', 'しまる', 'しみん', 'しむける', 'じむしょ', 'しめい', 'しめる', 'しもん', 'しゃいん', 'しゃうん', 'しゃおん', 'じゃがいも', 'しやくしょ', 'しゃくほう', 'しゃけん', 'しゃこ', 'しゃざい', 'しゃしん', 'しゃせん', 'しゃそう', 'しゃたい', 'しゃちょう', 'しゃっきん', 'じゃま', 'しゃりん', 'しゃれい', 'じゆう', 'じゅうしょ', 'しゅくはく', 'じゅしん', 'しゅっせき', 'しゅみ', 'しゅらば', 'じゅんばん', 'しょうかい', 'しょくたく', 'しょっけん', 'しょどう', 'しょもつ', 'しらせる', 'しらべる', 'しんか', 'しんこう', 'じんじゃ', 'しんせいじ', 'しんちく', 'しんりん', 'すあげ', 'すあし', 'すあな', 'ずあん', 'すいえい', 'すいか', 'すいとう', 'ずいぶん', 'すいようび', 'すうがく', 'すうじつ', 'すうせん', 'すおどり', 'すきま', 'すくう', 'すくない', 'すける', 'すごい', 'すこし', 'ずさん', 'すずしい', 'すすむ', 'すすめる', 'すっかり', 'ずっしり', 'ずっと', 'すてき', 'すてる', 'すねる', 'すのこ', 'すはだ', 'すばらしい', 'ずひょう', 'ずぶぬれ', 'すぶり', 'すふれ', 'すべて', 'すべる', 'ずほう', 'すぼん', 'すまい', 'すめし', 'すもう', 'すやき', 'すらすら', 'するめ', 'すれちがう', 'すろっと', 'すわる', 'すんぜん', 'すんぽう', 'せあぶら', 'せいかつ', 'せいげん', 'せいじ', 'せいよう', 'せおう', 'せかいかん', 'せきにん', 'せきむ', 'せきゆ', 'せきらんうん', 'せけん', 'せこう', 'せすじ', 'せたい', 'せたけ', 'せっかく', 'せっきゃく', 'ぜっく', 'せっけん', 'せっこつ', 'せっさたくま', 'せつぞく', 'せつだん', 'せつでん', 'せっぱん', 'せつび', 'せつぶん', 'せつめい', 'せつりつ', 'せなか', 'せのび', 'せはば', 'せびろ', 'せぼね', 'せまい', 'せまる', 'せめる', 'せもたれ', 'せりふ', 'ぜんあく', 'せんい', 'せんえい', 'せんか', 'せんきょ', 'せんく', 'せんげん', 'ぜんご', 'せんさい', 'せんしゅ', 'せんすい', 'せんせい', 'せんぞ', 'せんたく', 'せんちょう', 'せんてい', 'せんとう', 'せんぬき', 'せんねん', 'せんぱい', 'ぜんぶ', 'ぜんぽう', 'せんむ', 'せんめんじょ', 'せんもん', 'せんやく', 'せんゆう', 'せんよう', 'ぜんら', 'ぜんりゃく', 'せんれい', 'せんろ', 'そあく', 'そいとげる', 'そいね', 'そうがんきょう', 'そうき', 'そうご', 'そうしん', 'そうだん', 'そうなん', 'そうび', 'そうめん', 'そうり', 'そえもの', 'そえん', 'そがい', 'そげき', 'そこう', 'そこそこ', 'そざい', 'そしな', 'そせい', 'そせん', 'そそぐ', 'そだてる', 'そつう', 'そつえん', 'そっかん', 'そつぎょう', 'そっけつ', 'そっこう', 'そっせん', 'そっと', 'そとがわ', 'そとづら', 'そなえる', 'そなた', 'そふぼ', 'そぼく', 'そぼろ', 'そまつ', 'そまる', 'そむく', 'そむりえ', 'そめる', 'そもそも', 'そよかぜ', 'そらまめ', 'そろう', 'そんかい', 'そんけい', 'そんざい', 'そんしつ', 'そんぞく', 'そんちょう', 'ぞんび', 'ぞんぶん', 'そんみん', 'たあい', 'たいいん', 'たいうん', 'たいえき', 'たいおう', 'だいがく', 'たいき', 'たいぐう', 'たいけん', 'たいこ', 'たいざい', 'だいじょうぶ', 'だいすき', 'たいせつ', 'たいそう', 'だいたい', 'たいちょう', 'たいてい', 'だいどころ', 'たいない', 'たいねつ', 'たいのう', 'たいはん', 'だいひょう', 'たいふう', 'たいへん', 'たいほ', 'たいまつばな', 'たいみんぐ', 'たいむ', 'たいめん', 'たいやき', 'たいよう', 'たいら', 'たいりょく', 'たいる', 'たいわん', 'たうえ', 'たえる', 'たおす', 'たおる', 'たおれる', 'たかい', 'たかね', 'たきび', 'たくさん', 'たこく', 'たこやき', 'たさい', 'たしざん', 'だじゃれ', 'たすける', 'たずさわる', 'たそがれ', 'たたかう', 'たたく', 'ただしい', 'たたみ', 'たちばな', 'だっかい', 'だっきゃく', 'だっこ', 'だっしゅつ', 'だったい', 'たてる', 'たとえる', 'たなばた', 'たにん', 'たぬき', 'たのしみ', 'たはつ', 'たぶん', 'たべる', 'たぼう', 'たまご', 'たまる', 'だむる', 'ためいき', 'ためす', 'ためる', 'たもつ', 'たやすい', 'たよる', 'たらす', 'たりきほんがん', 'たりょう', 'たりる', 'たると', 'たれる', 'たれんと', 'たろっと', 'たわむれる', 'だんあつ', 'たんい', 'たんおん', 'たんか', 'たんき', 'たんけん', 'たんご', 'たんさん', 'たんじょうび', 'だんせい', 'たんそく', 'たんたい', 'だんち', 'たんてい', 'たんとう', 'だんな', 'たんにん', 'だんねつ', 'たんのう', 'たんぴん', 'だんぼう', 'たんまつ', 'たんめい', 'だんれつ', 'だんろ', 'だんわ', 'ちあい', 'ちあん', 'ちいき', 'ちいさい', 'ちえん', 'ちかい', 'ちから', 'ちきゅう', 'ちきん', 'ちけいず', 'ちけん', 'ちこく', 'ちさい', 'ちしき', 'ちしりょう', 'ちせい', 'ちそう', 'ちたい', 'ちたん', 'ちちおや', 'ちつじょ', 'ちてき', 'ちてん', 'ちぬき', 'ちぬり', 'ちのう', 'ちひょう', 'ちへいせん', 'ちほう', 'ちまた', 'ちみつ', 'ちみどろ', 'ちめいど', 'ちゃんこなべ', 'ちゅうい', 'ちゆりょく', 'ちょうし', 'ちょさくけん', 'ちらし', 'ちらみ', 'ちりがみ', 'ちりょう', 'ちるど', 'ちわわ', 'ちんたい', 'ちんもく', 'ついか', 'ついたち', 'つうか', 'つうじょう', 'つうはん', 'つうわ', 'つかう', 'つかれる', 'つくね', 'つくる', 'つけね', 'つける', 'つごう', 'つたえる', 'つづく', 'つつじ', 'つつむ', 'つとめる', 'つながる', 'つなみ', 'つねづね', 'つのる', 'つぶす', 'つまらない', 'つまる', 'つみき', 'つめたい', 'つもり', 'つもる', 'つよい', 'つるぼ', 'つるみく', 'つわもの', 'つわり', 'てあし', 'てあて', 'てあみ', 'ていおん', 'ていか', 'ていき', 'ていけい', 'ていこく', 'ていさつ', 'ていし', 'ていせい', 'ていたい', 'ていど', 'ていねい', 'ていひょう', 'ていへん', 'ていぼう', 'てうち', 'ておくれ', 'てきとう', 'てくび', 'でこぼこ', 'てさぎょう', 'てさげ', 'てすり', 'てそう', 'てちがい', 'てちょう', 'てつがく', 'てつづき', 'でっぱ', 'てつぼう', 'てつや', 'でぬかえ', 'てぬき', 'てぬぐい', 'てのひら', 'てはい', 'てぶくろ', 'てふだ', 'てほどき', 'てほん', 'てまえ', 'てまきずし', 'てみじか', 'てみやげ', 'てらす', 'てれび', 'てわけ', 'てわたし', 'でんあつ', 'てんいん', 'てんかい', 'てんき', 'てんぐ', 'てんけん', 'てんごく', 'てんさい', 'てんし', 'てんすう', 'でんち', 'てんてき', 'てんとう', 'てんない', 'てんぷら', 'てんぼうだい', 'てんめつ', 'てんらんかい', 'でんりょく', 'でんわ', 'どあい', 'といれ', 'どうかん', 'とうきゅう', 'どうぐ', 'とうし', 'とうむぎ', 'とおい', 'とおか', 'とおく', 'とおす', 'とおる', 'とかい', 'とかす', 'ときおり', 'ときどき', 'とくい', 'とくしゅう', 'とくてん', 'とくに', 'とくべつ', 'とけい', 'とける', 'とこや', 'とさか', 'としょかん', 'とそう', 'とたん', 'とちゅう', 'とっきゅう', 'とっくん', 'とつぜん', 'とつにゅう', 'とどける', 'ととのえる', 'とない', 'となえる', 'となり', 'とのさま', 'とばす', 'どぶがわ', 'とほう', 'とまる', 'とめる', 'ともだち', 'ともる', 'どようび', 'とらえる', 'とんかつ', 'どんぶり', 'ないかく', 'ないこう', 'ないしょ', 'ないす', 'ないせん', 'ないそう', 'なおす', 'ながい', 'なくす', 'なげる', 'なこうど', 'なさけ', 'なたでここ', 'なっとう', 'なつやすみ', 'ななおし', 'なにごと', 'なにもの', 'なにわ', 'なのか', 'なふだ', 'なまいき', 'なまえ', 'なまみ', 'なみだ', 'なめらか', 'なめる', 'なやむ', 'ならう', 'ならび', 'ならぶ', 'なれる', 'なわとび', 'なわばり', 'にあう', 'にいがた', 'にうけ', 'におい', 'にかい', 'にがて', 'にきび', 'にくしみ', 'にくまん', 'にげる', 'にさんかたんそ', 'にしき', 'にせもの', 'にちじょう', 'にちようび', 'にっか', 'にっき', 'にっけい', 'にっこう', 'にっさん', 'にっしょく', 'にっすう', 'にっせき', 'にってい', 'になう', 'にほん', 'にまめ', 'にもつ', 'にやり', 'にゅういん', 'にりんしゃ', 'にわとり', 'にんい', 'にんか', 'にんき', 'にんげん', 'にんしき', 'にんずう', 'にんそう', 'にんたい', 'にんち', 'にんてい', 'にんにく', 'にんぷ', 'にんまり', 'にんむ', 'にんめい', 'にんよう', 'ぬいくぎ', 'ぬかす', 'ぬぐいとる', 'ぬぐう', 'ぬくもり', 'ぬすむ', 'ぬまえび', 'ぬめり', 'ぬらす', 'ぬんちゃく', 'ねあげ', 'ねいき', 'ねいる', 'ねいろ', 'ねぐせ', 'ねくたい', 'ねくら', 'ねこぜ', 'ねこむ', 'ねさげ', 'ねすごす', 'ねそべる', 'ねだん', 'ねつい', 'ねっしん', 'ねつぞう', 'ねったいぎょ', 'ねぶそく', 'ねふだ', 'ねぼう', 'ねほりはほり', 'ねまき', 'ねまわし', 'ねみみ', 'ねむい', 'ねむたい', 'ねもと', 'ねらう', 'ねわざ', 'ねんいり', 'ねんおし', 'ねんかん', 'ねんきん', 'ねんぐ', 'ねんざ', 'ねんし', 'ねんちゃく', 'ねんど', 'ねんぴ', 'ねんぶつ', 'ねんまつ', 'ねんりょう', 'ねんれい', 'のいず', 'のおづま', 'のがす', 'のきなみ', 'のこぎり', 'のこす', 'のこる', 'のせる', 'のぞく', 'のぞむ', 'のたまう', 'のちほど', 'のっく', 'のばす', 'のはら', 'のべる', 'のぼる', 'のみもの', 'のやま', 'のらいぬ', 'のらねこ', 'のりもの', 'のりゆき', 'のれん', 'のんき', 'ばあい', 'はあく', 'ばあさん', 'ばいか', 'ばいく', 'はいけん', 'はいご', 'はいしん', 'はいすい', 'はいせん', 'はいそう', 'はいち', 'ばいばい', 'はいれつ', 'はえる', 'はおる', 'はかい', 'ばかり', 'はかる', 'はくしゅ', 'はけん', 'はこぶ', 'はさみ', 'はさん', 'はしご', 'ばしょ', 'はしる', 'はせる', 'ぱそこん', 'はそん', 'はたん', 'はちみつ', 'はつおん', 'はっかく', 'はづき', 'はっきり', 'はっくつ', 'はっけん', 'はっこう', 'はっさん', 'はっしん', 'はったつ', 'はっちゅう', 'はってん', 'はっぴょう', 'はっぽう', 'はなす', 'はなび', 'はにかむ', 'はぶらし', 'はみがき', 'はむかう', 'はめつ', 'はやい', 'はやし', 'はらう', 'はろうぃん', 'はわい', 'はんい', 'はんえい', 'はんおん', 'はんかく', 'はんきょう', 'ばんぐみ', 'はんこ', 'はんしゃ', 'はんすう', 'はんだん', 'ぱんち', 'ぱんつ', 'はんてい', 'はんとし', 'はんのう', 'はんぱ', 'はんぶん', 'はんぺん', 'はんぼうき', 'はんめい', 'はんらん', 'はんろん', 'ひいき', 'ひうん', 'ひえる', 'ひかく', 'ひかり', 'ひかる', 'ひかん', 'ひくい', 'ひけつ', 'ひこうき', 'ひこく', 'ひさい', 'ひさしぶり', 'ひさん', 'びじゅつかん', 'ひしょ', 'ひそか', 'ひそむ', 'ひたむき', 'ひだり', 'ひたる', 'ひつぎ', 'ひっこし', 'ひっし', 'ひつじゅひん', 'ひっす', 'ひつぜん', 'ぴったり', 'ぴっちり', 'ひつよう', 'ひてい', 'ひとごみ', 'ひなまつり', 'ひなん', 'ひねる', 'ひはん', 'ひびく', 'ひひょう', 'ひほう', 'ひまわり', 'ひまん', 'ひみつ', 'ひめい', 'ひめじし', 'ひやけ', 'ひやす', 'ひよう', 'びょうき', 'ひらがな', 'ひらく', 'ひりつ', 'ひりょう', 'ひるま', 'ひるやすみ', 'ひれい', 'ひろい', 'ひろう', 'ひろき', 'ひろゆき', 'ひんかく', 'ひんけつ', 'ひんこん', 'ひんしゅ', 'ひんそう', 'ぴんち', 'ひんぱん', 'びんぼう', 'ふあん', 'ふいうち', 'ふうけい', 'ふうせん', 'ぷうたろう', 'ふうとう', 'ふうふ', 'ふえる', 'ふおん', 'ふかい', 'ふきん', 'ふくざつ', 'ふくぶくろ', 'ふこう', 'ふさい', 'ふしぎ', 'ふじみ', 'ふすま', 'ふせい', 'ふせぐ', 'ふそく', 'ぶたにく', 'ふたん', 'ふちょう', 'ふつう', 'ふつか', 'ふっかつ', 'ふっき', 'ふっこく', 'ぶどう', 'ふとる', 'ふとん', 'ふのう', 'ふはい', 'ふひょう', 'ふへん', 'ふまん', 'ふみん', 'ふめつ', 'ふめん', 'ふよう', 'ふりこ', 'ふりる', 'ふるい', 'ふんいき', 'ぶんがく', 'ぶんぐ', 'ふんしつ', 'ぶんせき', 'ふんそう', 'ぶんぽう', 'へいあん', 'へいおん', 'へいがい', 'へいき', 'へいげん', 'へいこう', 'へいさ', 'へいしゃ', 'へいせつ', 'へいそ', 'へいたく', 'へいてん', 'へいねつ', 'へいわ', 'へきが', 'へこむ', 'べにいろ', 'べにしょうが', 'へらす', 'へんかん', 'べんきょう', 'べんごし', 'へんさい', 'へんたい', 'べんり', 'ほあん', 'ほいく', 'ぼうぎょ', 'ほうこく', 'ほうそう', 'ほうほう', 'ほうもん', 'ほうりつ', 'ほえる', 'ほおん', 'ほかん', 'ほきょう', 'ぼきん', 'ほくろ', 'ほけつ', 'ほけん', 'ほこう', 'ほこる', 'ほしい', 'ほしつ', 'ほしゅ', 'ほしょう', 'ほせい', 'ほそい', 'ほそく', 'ほたて', 'ほたる', 'ぽちぶくろ', 'ほっきょく', 'ほっさ', 'ほったん', 'ほとんど', 'ほめる', 'ほんい', 'ほんき', 'ほんけ', 'ほんしつ', 'ほんやく', 'まいにち', 'まかい', 'まかせる', 'まがる', 'まける', 'まこと', 'まさつ', 'まじめ', 'ますく', 'まぜる', 'まつり', 'まとめ', 'まなぶ', 'まぬけ', 'まねく', 'まほう', 'まもる', 'まゆげ', 'まよう', 'まろやか', 'まわす', 'まわり', 'まわる', 'まんが', 'まんきつ', 'まんぞく', 'まんなか', 'みいら', 'みうち', 'みえる', 'みがく', 'みかた', 'みかん', 'みけん', 'みこん', 'みじかい', 'みすい', 'みすえる', 'みせる', 'みっか', 'みつかる', 'みつける', 'みてい', 'みとめる', 'みなと', 'みなみかさい', 'みねらる', 'みのう', 'みのがす', 'みほん', 'みもと', 'みやげ', 'みらい', 'みりょく', 'みわく', 'みんか', 'みんぞく', 'むいか', 'むえき', 'むえん', 'むかい', 'むかう', 'むかえ', 'むかし', 'むぎちゃ', 'むける', 'むげん', 'むさぼる', 'むしあつい', 'むしば', 'むじゅん', 'むしろ', 'むすう', 'むすこ', 'むすぶ', 'むすめ', 'むせる', 'むせん', 'むちゅう', 'むなしい', 'むのう', 'むやみ', 'むよう', 'むらさき', 'むりょう', 'むろん', 'めいあん', 'めいうん', 'めいえん', 'めいかく', 'めいきょく', 'めいさい', 'めいし', 'めいそう', 'めいぶつ', 'めいれい', 'めいわく', 'めぐまれる', 'めざす', 'めした', 'めずらしい', 'めだつ', 'めまい', 'めやす', 'めんきょ', 'めんせき', 'めんどう', 'もうしあげる', 'もうどうけん', 'もえる', 'もくし', 'もくてき', 'もくようび', 'もちろん', 'もどる', 'もらう', 'もんく', 'もんだい', 'やおや', 'やける', 'やさい', 'やさしい', 'やすい', 'やすたろう', 'やすみ', 'やせる', 'やそう', 'やたい', 'やちん', 'やっと', 'やっぱり', 'やぶる', 'やめる', 'ややこしい', 'やよい', 'やわらかい', 'ゆうき', 'ゆうびんきょく', 'ゆうべ', 'ゆうめい', 'ゆけつ', 'ゆしゅつ', 'ゆせん', 'ゆそう', 'ゆたか', 'ゆちゃく', 'ゆでる', 'ゆにゅう', 'ゆびわ', 'ゆらい', 'ゆれる', 'ようい', 'ようか', 'ようきゅう', 'ようじ', 'ようす', 'ようちえん', 'よかぜ', 'よかん', 'よきん', 'よくせい', 'よくぼう', 'よけい', 'よごれる', 'よさん', 'よしゅう', 'よそう', 'よそく', 'よっか', 'よてい', 'よどがわく', 'よねつ', 'よやく', 'よゆう', 'よろこぶ', 'よろしい', 'らいう', 'らくがき', 'らくご', 'らくさつ', 'らくだ', 'らしんばん', 'らせん', 'らぞく', 'らたい', 'らっか', 'られつ', 'りえき', 'りかい', 'りきさく', 'りきせつ', 'りくぐん', 'りくつ', 'りけん', 'りこう', 'りせい', 'りそう', 'りそく', 'りてん', 'りねん', 'りゆう', 'りゅうがく', 'りよう', 'りょうり', 'りょかん', 'りょくちゃ', 'りょこう', 'りりく', 'りれき', 'りろん', 'りんご', 'るいけい', 'るいさい', 'るいじ', 'るいせき', 'るすばん', 'るりがわら', 'れいかん', 'れいぎ', 'れいせい', 'れいぞうこ', 'れいとう', 'れいぼう', 'れきし', 'れきだい', 'れんあい', 'れんけい', 'れんこん', 'れんさい', 'れんしゅう', 'れんぞく', 'れんらく', 'ろうか', 'ろうご', 'ろうじん', 'ろうそく', 'ろくが', 'ろこつ', 'ろじうら', 'ろしゅつ', 'ろせん', 'ろてん', 'ろめん', 'ろれつ', 'ろんぎ', 'ろんぱ', 'ろんぶん', 'ろんり', 'わかす', 'わかめ', 'わかやま', 'わかれる', 'わしつ', 'わじまし', 'わすれもの', 'わらう', 'われる'];
 wordList$1.space = '　';
+
+/**
+ * KeyPair
+ * =======
+ *
+ * A keyPair is a collection of a private key and a public key.
+ * const keyPair = new KeyPair().fromRandom()
+ * const keyPair = new KeyPair().fromPrivKey(privKey)
+ * const privKey = keyPair.privKey
+ * const pubKey = keyPair.pubKey
+ */
 
 class KeyPair extends Struct {
   constructor(privKey, pubKey, PrivKey$1 = PrivKey) {
@@ -4351,6 +4997,25 @@ KeyPair.Testnet = class extends KeyPair {
 
 };
 
+/**
+ * Ecdsa
+ * =====
+ *
+ * Ecdsa is the signature algorithm used by bitcoin. The way you probably want
+ * to use this is with the static Ecdsa.sign( ... ) and Ecdsa.verify( ... )
+ * functions. Note that in bitcoin, the hashBuf is little endian, so if you are
+ * signing or verifying something that has to do with a transaction, you should
+ * explicitly plug in that it is little endian as an option to the sign and
+ * verify functions.
+ *
+ * This implementation of Ecdsa uses deterministic signatures as defined in RFC
+ * 6979 as the default, which has become a defacto standard in bitcoin wallets
+ * due to recurring security issues around using a value of k pulled from a
+ * possibly faulty entropy pool. If you use the same value of k twice, someone
+ * can derive your private key. Deterministic k prevents this without needing
+ * an entropy pool.
+ */
+
 class Ecdsa extends Struct {
   constructor(sig, keyPair, hashBuf, k, endian, verified) {
     super({
@@ -4420,6 +5085,12 @@ class Ecdsa extends Struct {
     const workersResult = await Workers.asyncObjectMethod(this, 'calcrecovery', []);
     return this.fromFastBuffer(workersResult.resbuf);
   }
+  /**
+     * Calculates the recovery factor, and mutates sig so that it now contains
+     * the recovery factor and the "compressed" variable. Throws an exception on
+     * failure.
+     */
+
 
   static calcrecovery(sig, pubKey, hashBuf) {
     const ecdsa = new Ecdsa().fromObject({
@@ -4470,6 +5141,21 @@ class Ecdsa extends Struct {
     this.k = k;
     return this;
   }
+  /**
+     * The traditional Ecdsa algorithm uses a purely random value of k. This has
+     * the negative that when signing, your entropy must be good, or the private
+     * key can be recovered if two signatures use the same value of k. It turns out
+     * that k does not have to be purely random. It can be deterministic, so long
+     * as an attacker can't guess it. RFC 6979 specifies how to do this using a
+     * combination of the private key and the hash of the thing to be signed. It is
+     * best practice to use this value, which can be tested for byte-for-byte
+     * accuracy, and is resistant to a broken RNG. Note that it is actually the
+     * case that bitcoin private keys have been compromised through that attack.
+     * Deterministic k is a best practice.
+     *
+     * https://tools.ietf.org/html/rfc6979#section-3.2
+     */
+
 
   deterministicK(badrs) {
     let v = Buffer.alloc(32);
@@ -4485,11 +5171,14 @@ class Ecdsa extends Struct {
     v = Hash.sha256Hmac(v, k);
     v = Hash.sha256Hmac(v, k);
     let T = new Bn().fromBuffer(v);
-    const N = Point.getN();
+    const N = Point.getN(); // if r or s were invalid when this function was used in signing,
+    // we do not want to actually compute r, s here for efficiency, so,
+    // we can increment badrs. explained at end of RFC 6979 section 3.2
 
     if (badrs === undefined) {
       badrs = 0;
-    }
+    } // also explained in 3.2, we must ensure T is in the proper range (0, N)
+
 
     for (let i = 0; i < badrs || !(T.lt(N) && T.gt(0)); i++) {
       k = Hash.sha256Hmac(Buffer.concat([v, Buffer.from([0x00])]), k);
@@ -4501,6 +5190,13 @@ class Ecdsa extends Struct {
     this.k = T;
     return this;
   }
+  /**
+     * Information about public key recovery:
+     * https://bitcointalk.org/index.php?topic=6430.0
+     * http://stackoverflow.com/questions/19665491/how-do-i-get-an-ecdsa-public-key-from-just-a-bitcoin-signature-sec1-4-1-6-k
+     * This code was originally taken from BitcoinJS
+     */
+
 
   sig2PubKey() {
     const recovery = this.sig.recovery;
@@ -4511,13 +5207,18 @@ class Ecdsa extends Struct {
 
     const e = new Bn().fromBuffer(this.hashBuf);
     const r = this.sig.r;
-    const s = this.sig.s;
-    const isYOdd = recovery & 1;
+    const s = this.sig.s; // A set LSB signifies that the y-coordinate is odd
+
+    const isYOdd = recovery & 1; // The more significant bit specifies whether we should use the
+    // first or second candidate key.
+
     const isSecondKey = recovery >> 1;
     const n = Point.getN();
-    const G = Point.getG();
+    const G = Point.getG(); // 1.1 LEt x = r + jn
+
     const x = isSecondKey ? r.add(n) : r;
-    const R = Point.fromX(isYOdd, x);
+    const R = Point.fromX(isYOdd, x); // 1.4 Check that nR is at infinity
+
     let errm = '';
 
     try {
@@ -4528,10 +5229,14 @@ class Ecdsa extends Struct {
 
     if (errm !== 'point mul out of range') {
       throw new Error('nR is not a valid curve point');
-    }
+    } // Compute -e from e
 
-    const eNeg = e.neg().umod(n);
-    const rInv = r.invm(n);
+
+    const eNeg = e.neg().umod(n); // 1.6.1 Compute Q = r^-1 (sR - eG)
+    // Q = r^-1 (sR + -eG)
+
+    const rInv = r.invm(n); // const Q = R.multiplyTwo(s, G, eNeg).mul(rInv)
+
     const Q = R.mul(s).add(G.mul(eNeg)).mul(rInv);
     const pubKey = new PubKey(Q);
     pubKey.compressed = this.sig.compressed;
@@ -4592,7 +5297,7 @@ class Ecdsa extends Struct {
     const sinv = s.invm(n);
     const u1 = sinv.mul(e).mod(n);
     const u2 = sinv.mul(r).mod(n);
-    const p = Point.getG().mulAdd(u1, this.keyPair.pubKey.point, u2);
+    const p = Point.getG().mulAdd(u1, this.keyPair.pubKey.point, u2); // const p = Point.getG().mulAdd(u1, this.keyPair.pubKey.point, u2)
 
     if (p.isInfinity()) {
       return 'p is infinity';
@@ -4620,7 +5325,8 @@ class Ecdsa extends Struct {
 
     const N = Point.getN();
     const G = Point.getG();
-    const e = new Bn().fromBuffer(hashBuf);
+    const e = new Bn().fromBuffer(hashBuf); // try different values of k until r, s are valid
+
     let badrs = 0;
     let k, Q, r, s;
 
@@ -4634,7 +5340,9 @@ class Ecdsa extends Struct {
       Q = G.mul(k);
       r = Q.getX().mod(N);
       s = k.invm(N).mul(e.add(d.mul(r))).mod(N);
-    } while (r.cmp(0) <= 0 || s.cmp(0) <= 0);
+    } while (r.cmp(0) <= 0 || s.cmp(0) <= 0); // enforce low s
+    // see Bip 62, "low S values in signatures"
+
 
     if (s.gt(new Bn().fromBuffer(Buffer.from('7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0', 'hex')))) {
       s = Point.getN().sub(s);
@@ -4739,6 +5447,18 @@ class Ecdsa extends Struct {
 
 }
 
+/**
+ * Bitcoin Signed Message
+ * ======================
+ *
+ * "Bitcoin Signed Message" just refers to a standard way of signing and
+ * verifying an arbitrary message. The standard way to do this involves using a
+ * "Bitcoin Signed Message:\n" prefix, which this code does. You are probably
+ * interested in the static Bsm.sign( ... ) and Bsm.verify( ... ) functions,
+ * which deal with a base64 string representing the compressed format of a
+ * signature.
+ */
+
 class Bsm extends Struct {
   constructor(messageBuf, keyPair, sig, address, verified) {
     super({
@@ -4827,7 +5547,7 @@ class Bsm extends Struct {
       return this;
     }
 
-    const address = new Address().fromPubKey(ecdsa.keyPair.pubKey, undefined, this.sig.compressed);
+    const address = new Address().fromPubKey(ecdsa.keyPair.pubKey, undefined, this.sig.compressed); // TODO: what if livenet/testnet mismatch?
 
     if (cmp(address.hashBuf, this.address.hashBuf)) {
       this.verified = true;
@@ -4841,6 +5561,14 @@ class Bsm extends Struct {
 }
 
 Bsm.magicBytes = Buffer.from('Bitcoin Signed Message:\n');
+
+/**
+ * Block Header
+ * ============
+ *
+ * Every block contains a blockHeader. This is probably not something you will
+ * personally use, but it's here if you need it.
+ */
 
 class BlockHeader extends Struct {
   constructor(versionBytesNum, prevBlockHashBuf, merkleRootBuf, time, bits, nonce) {
@@ -4903,6 +5631,14 @@ class BlockHeader extends Struct {
 
 }
 
+/**
+ * Merkle
+ * ======
+ *
+ * A node in a Merkle tree (possibly the root node, in which case it is the
+ * Merkle root). A node either contains a buffer or links to two other nodes.
+ */
+
 class Merkle extends Struct {
   constructor(hashBuf, buf, merkle1, merkle2) {
     super({
@@ -4937,6 +5673,10 @@ class Merkle extends Struct {
     const log = Math.log2(bufs.length);
 
     if (!Number.isInteger(log)) {
+      // If a merkle tree does not have a number of ends that is a power of 2,
+      // then we have to copy the last value until it is a power of 2. Note
+      // that we copy *the actual object* over and over again, which ensures
+      // that when we finds its hash, the hash is cached.
       const lastval = bufs[bufs.length - 1];
       var len = Math.pow(2, Math.ceil(log));
 
@@ -4954,6 +5694,11 @@ class Merkle extends Struct {
   static fromBuffers(bufs) {
     return new this().fromBuffers(bufs);
   }
+  /**
+     * Takes two arrays, both of which *must* be of a length that is a power of
+     * two.
+     */
+
 
   fromBufferArrays(bufs1, bufs2) {
     if (bufs1.length === 1) {
@@ -4989,6 +5734,13 @@ class Merkle extends Struct {
 
 }
 
+/**
+ * Hash Cache
+ * ==========
+ *
+ * For use in sighash.
+ */
+
 class HashCache extends Struct {
   constructor(prevoutsHashBuf, sequenceHashBuf, outputsHashBuf) {
     super();
@@ -5023,6 +5775,16 @@ class HashCache extends Struct {
   }
 
 }
+
+/**
+ * VarInt (a.k.a. Compact Size)
+ * ============================
+ *
+ * A varInt is a varible sized integer, and it is a format that is unique to
+ * bitcoin, and used throughout bitcoin to represent the length of binary data
+ * in a compact format that can take up as little as 1 byte or as much as 9
+ * bytes.
+ */
 
 class VarInt extends Struct {
   constructor(buf) {
@@ -5083,6 +5845,16 @@ class VarInt extends Struct {
   }
 
 }
+
+/*
+ * Transaction Input
+ * =================
+ *
+ * An input to a transaction. The way you probably want to use this is through
+ * the convenient method of new TxIn(txHashBuf, txOutNum, script, nSequence) (i.e., you
+ * can leave out the scriptVi, which is computed automatically if you leave it
+ * out.)
+ */
 
 class TxIn extends Struct {
   constructor(txHashBuf, txOutNum, scriptVi, script, nSequence = 0xffffffff) {
@@ -5157,12 +5929,19 @@ class TxIn extends Struct {
     bw.writeUInt32LE(this.nSequence);
     return bw;
   }
+  /**
+     * Generate txIn with blank signatures from a txOut and its
+     * txHashBuf+txOutNum. A "blank" signature is just an OP_0. The pubKey also
+     * defaults to blank but can be substituted with the real public key if you
+     * know what it is.
+     */
+
 
   fromPubKeyHashTxOut(txHashBuf, txOutNum, txOut, pubKey) {
     const script = new Script();
 
     if (txOut.script.isPubKeyHashOut()) {
-      script.writeOpCode(OpCode.OP_0);
+      script.writeOpCode(OpCode.OP_0); // blank signature
 
       if (pubKey) {
         script.writeBuffer(pubKey.toBuffer());
@@ -5188,21 +5967,58 @@ class TxIn extends Struct {
 
     return false;
   }
+  /**
+     * Analagous to bitcoind's SetNull in COutPoint
+     */
+
 
   setNullInput() {
     this.txHashBuf = Buffer.alloc(32);
     this.txHashBuf.fill(0);
-    this.txOutNum = 0xffffffff;
+    this.txOutNum = 0xffffffff; // -1 cast to unsigned int
   }
 
 }
+/* Interpret sequence numbers as relative lock-time constraints. */
+
 
 TxIn.LOCKTIME_VERIFY_SEQUENCE = 1 << 0;
+/* Setting nSequence to this value for every input in a transaction disables
+   * nLockTime. */
+
 TxIn.SEQUENCE_FINAL = 0xffffffff;
+/* Below flags apply in the context of Bip 68 */
+
+/* If this flag set, txIn.nSequence is NOT interpreted as a relative lock-time.
+   * */
+
 TxIn.SEQUENCE_LOCKTIME_DISABLE_FLAG = 1 << 31;
+/* If txIn.nSequence encodes a relative lock-time and this flag is set, the
+   * relative lock-time has units of 512 seconds, otherwise it specifies blocks
+   * with a granularity of 1. */
+
 TxIn.SEQUENCE_LOCKTIME_TYPE_FLAG = 1 << 22;
+/* If txIn.nSequence encodes a relative lock-time, this mask is applied to
+   * extract that lock-time from the sequence field. */
+
 TxIn.SEQUENCE_LOCKTIME_MASK = 0x0000ffff;
+/* In order to use the same number of bits to encode roughly the same
+   * wall-clock duration, and because blocks are naturally limited to occur
+   * every 600s on average, the minimum granularity for time-based relative
+   * lock-time is fixed at 512 seconds.  Converting from CTxIn::nSequence to
+   * seconds is performed by multiplying by 512 = 2^9, or equivalently
+   * shifting up by 9 bits. */
+
 TxIn.SEQUENCE_LOCKTIME_GRANULARITY = 9;
+
+/**
+ * Transaction Output
+ * ==================
+ *
+ * An output to a transaction. The way you normally want to make one is with
+ * new TxOut(valueBn, script) (i.e., just as with TxIn, you can leave out the
+ * scriptVi, since it can be computed automatically.
+ */
 
 class TxOut extends Struct {
   constructor(valueBn, scriptVi, script) {
@@ -5267,6 +6083,13 @@ class TxOut extends Struct {
   }
 
 }
+
+/**
+ * Transaction
+ * ===========
+ *
+ * A bitcoin transaction.
+ */
 
 class Tx extends Struct {
   constructor(versionBytesNum = 1, txInsVi = VarInt.fromNumber(0), txIns = [], txOutsVi = VarInt.fromNumber(0), txOuts = [], nLockTime = 0) {
@@ -5361,15 +6184,17 @@ class Tx extends Struct {
 
     bw.writeUInt32LE(this.nLockTime);
     return bw;
-  }
+  } // https://github.com/Bitcoin-UAHF/spec/blob/master/replay-protected-sighash.md
+
 
   hashPrevouts() {
     const bw = new Bw();
 
     for (const i in this.txIns) {
       const txIn = this.txIns[i];
-      bw.write(txIn.txHashBuf);
-      bw.writeUInt32LE(txIn.txOutNum);
+      bw.write(txIn.txHashBuf); // outpoint (1/2)
+
+      bw.writeUInt32LE(txIn.txOutNum); // outpoint (2/2)
     }
 
     return Hash.sha256Sha256(bw.toBuffer());
@@ -5396,8 +6221,16 @@ class Tx extends Struct {
 
     return Hash.sha256Sha256(bw.toBuffer());
   }
+  /**
+   * For a normal transaction, subScript is usually the scriptPubKey. For a
+   * p2sh transaction, subScript is usually the redeemScript. If you're not
+   * normal because you're using OP_CODESEPARATORs, you know what to do.
+   */
+
 
   sighash(nHashType, nIn, subScript, valueBn, flags = 0, hashCache = new HashCache()) {
+    // start with UAHF part (Bitcoin SV)
+    // https://github.com/Bitcoin-UAHF/spec/blob/master/replay-protected-sighash.md
     if (nHashType & Sig.SIGHASH_FORKID && flags & Tx.SCRIPT_ENABLE_SIGHASH_FORKID) {
       let hashPrevouts = Buffer.alloc(32, 0);
       let hashSequence = Buffer.alloc(32, 0);
@@ -5421,8 +6254,10 @@ class Tx extends Struct {
       bw.writeUInt32LE(this.versionBytesNum);
       bw.write(hashPrevouts);
       bw.write(hashSequence);
-      bw.write(this.txIns[nIn].txHashBuf);
-      bw.writeUInt32LE(this.txIns[nIn].txOutNum);
+      bw.write(this.txIns[nIn].txHashBuf); // outpoint (1/2)
+
+      bw.writeUInt32LE(this.txIns[nIn].txOutNum); // outpoint (2/2)
+
       bw.writeVarIntNum(subScript.toBuffer().length);
       bw.write(subScript.toBuffer());
       bw.writeUInt64LEBn(valueBn);
@@ -5431,7 +6266,8 @@ class Tx extends Struct {
       bw.writeUInt32LE(this.nLockTime);
       bw.writeUInt32LE(nHashType >>> 0);
       return new Br(Hash.sha256Sha256(bw.toBuffer())).readReverse();
-    }
+    } // original bitcoin code follows - not related to UAHF (Bitcoin SV)
+
 
     const txcopy = this.cloneByBuffer();
     subScript = new Script().fromBuffer(subScript.toBuffer());
@@ -5453,6 +6289,8 @@ class Tx extends Struct {
         }
       }
     } else if ((nHashType & 31) === Sig.SIGHASH_SINGLE) {
+      // The SIGHASH_SINGLE bug.
+      // https://bitcointalk.org/index.php?topic=260595.0
       if (nIn > txcopy.txOuts.length - 1) {
         return Buffer.from('0000000000000000000000000000000000000000000000000000000000000001', 'hex');
       }
@@ -5471,7 +6309,8 @@ class Tx extends Struct {
           txcopy.txIns[i].nSequence = 0;
         }
       }
-    }
+    } // else, SIGHASH_ALL
+
 
     if (nHashType & Sig.SIGHASH_ANYONECANPAY) {
       txcopy.txIns[0] = txcopy.txIns[nIn];
@@ -5486,7 +6325,8 @@ class Tx extends Struct {
   async asyncSighash(nHashType, nIn, subScript, valueBn, flags = 0, hashCache = {}) {
     const workersResult = await Workers.asyncObjectMethod(this, 'sighash', [nHashType, nIn, subScript, valueBn, flags, hashCache]);
     return workersResult.resbuf;
-  }
+  } // This function returns a signature but does not update any inputs
+
 
   sign(keyPair, nHashType = Sig.SIGHASH_ALL | Sig.SIGHASH_FORKID, nIn, subScript, valueBn, flags = Tx.SCRIPT_ENABLE_SIGHASH_FORKID, hashCache = {}) {
     const hashBuf = this.sighash(nHashType, nIn, subScript, valueBn, flags, hashCache);
@@ -5499,7 +6339,8 @@ class Tx extends Struct {
   async asyncSign(keyPair, nHashType = Sig.SIGHASH_ALL | Sig.SIGHASH_FORKID, nIn, subScript, valueBn, flags = Tx.SCRIPT_ENABLE_SIGHASH_FORKID, hashCache = {}) {
     const workersResult = await Workers.asyncObjectMethod(this, 'sign', [keyPair, nHashType, nIn, subScript, valueBn, flags, hashCache]);
     return new Sig().fromFastBuffer(workersResult.resbuf);
-  }
+  } // This function takes a signature as input and does not parse any inputs
+
 
   verify(sig, pubKey, nIn, subScript, enforceLowS = false, valueBn, flags = Tx.SCRIPT_ENABLE_SIGHASH_FORKID, hashCache = {}) {
     const hashBuf = this.sighash(sig.nHashType, nIn, subScript, valueBn, flags, hashCache);
@@ -5562,10 +6403,18 @@ class Tx extends Struct {
     this.txOutsVi = VarInt.fromNumber(this.txOutsVi.toNumber() + 1);
     return this;
   }
+  /**
+   * Analagous to bitcoind's IsCoinBase function in transaction.h
+   */
+
 
   isCoinbase() {
     return this.txIns.length === 1 && this.txIns[0].hasNullInput();
   }
+  /**
+   * BIP 69 sorting. Be sure to sign after sorting.
+   */
+
 
   sort() {
     this.txIns.sort((first, second) => {
@@ -5579,8 +6428,22 @@ class Tx extends Struct {
 
 }
 
-Tx.MAX_MONEY = 21000000 * 1e8;
+Tx.MAX_MONEY = 21000000 * 1e8; // This is defined on Interp, but Tx cannot depend on Interp - must redefine here
+
 Tx.SCRIPT_ENABLE_SIGHASH_FORKID = 1 << 16;
+
+/**
+ * Block
+ * =====
+ *
+ * A block, of course, is a collection of transactions. This class is somewhat
+ * incompconste at the moment. In the future, it should support the ability to
+ * check to see if a transaction is in a block (thanks to the magic of merkle
+ * trees). You will probably never use Yours Bitcoin to create a block, since almost
+ * everyone will use bitcoind for that. As such, the primary way to use this is
+ * new Block().fromBuffer(buf), which will parse the block and prepare its insides
+ * for you to inspect.
+ */
 
 class Block extends Struct {
   constructor(blockHeader, txsVi, txs) {
@@ -5668,6 +6531,16 @@ class Block extends Struct {
     const merkleRootBuf = Merkle.fromBuffers(txsbufs).hash();
     return Buffer.compare(merkleRootBuf, this.blockHeader.merkleRootBuf);
   }
+  /**
+   * Sometimes we don't want to parse an entire block into memory. Instead, we
+   * simply want to iterate through all transactions in the block. That is what
+   * this method is for. This method returns an efficient iterator which can be
+   * used in a `for (tx of txs)` construct that returns each tx one at a time
+   * without first parsing all of them into memory.
+   *
+   * @param {Buffer} blockBuf A buffer of a block.
+   */
+
 
   static iterateTxs(blockBuf) {
     const br = new Br(blockBuf);
@@ -5691,6 +6564,24 @@ class Block extends Struct {
 }
 
 Block.MAX_BLOCK_SIZE = 1000000;
+
+/**
+ * Script Interpreter
+ * ==================
+ *
+ * Bitcoin transactions contain scripts. Each input has a script called the
+ * scriptSig, and each output has a script called the scriptPubKey. To validate
+ * an input, the ScriptSig is executed, then with the same stack, the
+ * scriptPubKey from the output corresponding to that input is run. The primary
+ * way to use this class is via the verify function:
+ *
+ * new Interp().verify( ... )
+ *
+ * In some ways, the script interpreter is one of the most poorly architected
+ * components of Yours Bitcoin because of the giant switch statement in step(). But
+ * that is deliberately so to make it similar to bitcoin core, and thus easier
+ * to audit.
+ */
 
 class Interp extends Struct {
   constructor(script, tx, nIn, stack = [], altStack = [], pc = 0, pBeginCodeHash = 0, nOpCount = 0, ifStack = [], errStr = '', flags = Interp.defaultFlags, valueBn = new Bn(0)) {
@@ -5727,6 +6618,10 @@ class Interp extends Struct {
     this.tx = json.tx ? new Tx().fromJSON(json.tx) : undefined;
     return this;
   }
+  /**
+   * Convert JSON containing everything but the tx to an interp object.
+   */
+
 
   fromJSONNoTx(json) {
     this.fromObject({
@@ -5771,6 +6666,10 @@ class Interp extends Struct {
     json.tx = this.tx ? this.tx.toJSON() : undefined;
     return json;
   }
+  /**
+   * Convert everything but the tx to JSON.
+   */
+
 
   toJSONNoTx() {
     let stack = [];
@@ -5814,6 +6713,12 @@ class Interp extends Struct {
 
     return bw;
   }
+  /**
+   * In order to make auduting the script interpreter easier, we use the same
+   * constants as bitcoin core, including the flags, which customize the
+   * operation of the interpreter.
+   */
+
 
   static getFlags(flagstr) {
     let flags = 0;
@@ -5876,6 +6781,7 @@ class Interp extends Struct {
   static castToBool(buf) {
     for (let i = 0; i < buf.length; i++) {
       if (buf[i] !== 0) {
+        // can be negative zero
         if (i === buf.length - 1 && buf[i] === 0x80) {
           return false;
         }
@@ -5886,8 +6792,14 @@ class Interp extends Struct {
 
     return false;
   }
+  /**
+   * Translated from bitcoin core's CheckSigEncoding
+   */
+
 
   checkSigEncoding(buf) {
+    // Empty signature. Not strictly DER encoded, but allowed to provide a
+    // compact way to provide an invalid signature for use with CHECK(MULTI)SIG
     if (buf.length === 0) {
       return true;
     }
@@ -5913,6 +6825,10 @@ class Interp extends Struct {
 
     return true;
   }
+  /**
+   * Translated from bitcoin core's CheckPubKeyEncoding
+   */
+
 
   checkPubKeyEncoding(buf) {
     if ((this.flags & Interp.SCRIPT_VERIFY_STRICTENC) !== 0 && !PubKey.isCompressedOrUncompressed(buf)) {
@@ -5922,15 +6838,38 @@ class Interp extends Struct {
 
     return true;
   }
+  /**
+   * Translated from bitcoin core's CheckLockTime
+   */
+
 
   checkLockTime(nLockTime) {
+    // There are two kinds of nLockTime: lock-by-blockheight
+    // and lock-by-blocktime, distinguished by whether
+    // nLockTime < LOCKTIME_THRESHOLD.
+    //
+    // We want to compare apples to apples, so fail the script
+    // unless the type of nLockTime being tested is the same as
+    // the nLockTime in the transaction.
     if (!(this.tx.nLockTime < Interp.LOCKTIME_THRESHOLD && nLockTime < Interp.LOCKTIME_THRESHOLD || this.tx.nLockTime >= Interp.LOCKTIME_THRESHOLD && nLockTime >= Interp.LOCKTIME_THRESHOLD)) {
       return false;
-    }
+    } // Now that we know we're comparing apples-to-apples, the
+    // comparison is a simple numeric one.
+
 
     if (nLockTime > this.tx.nLockTime) {
       return false;
-    }
+    } // Finally the nLockTime feature can be disabled and thus
+    // CHECKLOCKTIMEVERIFY bypassed if every txIn has been
+    // finalized by setting nSequence to maxint. The
+    // transaction would be allowed into the blockchain, making
+    // the opCode ineffective.
+    //
+    // Testing if this vin is not final is sufficient to
+    // prevent this condition. Alternatively we could test all
+    // inputs, but testing just this input minimizes the data
+    // required to prove correct CHECKLOCKTIMEVERIFY execution.
+
 
     if (TxIn.SEQUENCE_FINAL === this.tx.txIns[this.nIn].nSequence) {
       return false;
@@ -5938,25 +6877,46 @@ class Interp extends Struct {
 
     return true;
   }
+  /**
+   * Translated from bitcoin core's CheckSequence.
+   */
+
 
   checkSequence(nSequence) {
-    let txToSequence = this.tx.txIns[this.nIn].nSequence;
+    // Relative lock times are supported by comparing the passed
+    // in operand to the sequence number of the input.
+    let txToSequence = this.tx.txIns[this.nIn].nSequence; // Fail if the transaction's version number is not set high
+    // enough to trigger Bip 68 rules.
 
     if (this.tx.versionBytesNum < 2) {
       return false;
-    }
+    } // Sequence numbers with their most significant bit set are not
+    // consensus constrained. Testing that the transaction's sequence
+    // number do not have this bit set prevents using this property
+    // to get around a CHECKSEQUENCEVERIFY check.
+
 
     if (txToSequence & TxIn.SEQUENCE_LOCKTIME_DISABLE_FLAG) {
       return false;
-    }
+    } // Mask off any bits that do not have consensus-enforced meaning
+    // before doing the integer comparisons
+
 
     let nLockTimeMask = TxIn.SEQUENCE_LOCKTIME_TYPE_FLAG | TxIn.SEQUENCE_LOCKTIME_MASK;
     let txToSequenceMasked = txToSequence & nLockTimeMask;
-    let nSequenceMasked = nSequence & nLockTimeMask;
+    let nSequenceMasked = nSequence & nLockTimeMask; // There are two kinds of nSequence: lock-by-blockheight
+    // and lock-by-blocktime, distinguished by whether
+    // nSequenceMasked < CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG.
+    //
+    // We want to compare apples to apples, so fail the script
+    // unless the type of nSequenceMasked being tested is the same as
+    // the nSequenceMasked in the transaction.
 
     if (!(txToSequenceMasked < TxIn.SEQUENCE_LOCKTIME_TYPE_FLAG && nSequenceMasked < TxIn.SEQUENCE_LOCKTIME_TYPE_FLAG || txToSequenceMasked >= TxIn.SEQUENCE_LOCKTIME_TYPE_FLAG && nSequenceMasked >= TxIn.SEQUENCE_LOCKTIME_TYPE_FLAG)) {
       return false;
-    }
+    } // Now that we know we're comparing apples-to-apples, the
+    // comparison is a simple numeric one.
+
 
     if (nSequenceMasked > txToSequenceMasked) {
       return false;
@@ -5964,6 +6924,12 @@ class Interp extends Struct {
 
     return true;
   }
+  /**
+   * Based on bitcoin core's EvalScript function, with the inner loop moved to
+   * Interp.prototype.step()
+   * bitcoin core commit: b5d1b1092998bc95313856d535c632ea5a8f9104
+   */
+
 
   *eval() {
     if (this.script.toBuffer().length > 10000) {
@@ -5980,7 +6946,8 @@ class Interp extends Struct {
         } else {
           yield fSuccess;
         }
-      }
+      } // Size limits
+
 
       if (this.stack.length + this.altStack.length > 1000) {
         this.errStr = 'SCRIPT_ERR_STACK_SIZE';
@@ -5998,10 +6965,18 @@ class Interp extends Struct {
 
     yield true;
   }
+  /**
+   * Based on the inner loop of bitcoin core's EvalScript function
+   */
+
 
   step() {
-    let fRequireMinimal = (this.flags & Interp.SCRIPT_VERIFY_MINIMALDATA) !== 0;
-    let fExec = !(this.ifStack.indexOf(false) + 1);
+    let fRequireMinimal = (this.flags & Interp.SCRIPT_VERIFY_MINIMALDATA) !== 0; // bool fExec = !count(ifStack.begin(), ifStack.end(), false)
+
+    let fExec = !(this.ifStack.indexOf(false) + 1); //
+    // Read instruction
+    //
+
     let chunk = this.script.chunks[this.pc];
     this.pc++;
     let opCodeNum = chunk.opCodeNum;
@@ -6014,7 +6989,8 @@ class Interp extends Struct {
     if (chunk.buf && chunk.buf.length > Interp.MAX_SCRIPT_ELEMENT_SIZE) {
       this.errStr = 'SCRIPT_ERR_PUSH_SIZE';
       return false;
-    }
+    } // Note how OpCode.OP_RESERVED does not count towards the opCode limit.
+
 
     if (opCodeNum > OpCode.OP_16 && ++this.nOpCount > 201) {
       this.errStr = 'SCRIPT_ERR_OP_COUNT';
@@ -6041,6 +7017,9 @@ class Interp extends Struct {
       }
     } else if (fExec || OpCode.OP_IF <= opCodeNum && opCodeNum <= OpCode.OP_ENDIF) {
       switch (opCodeNum) {
+        //
+        // Push value
+        //
         case OpCode.OP_1NEGATE:
         case OpCode.OP_1:
         case OpCode.OP_2:
@@ -6059,11 +7038,17 @@ class Interp extends Struct {
         case OpCode.OP_15:
         case OpCode.OP_16:
           {
+            // ( -- value)
+            // ScriptNum bn((int)opCode - (int)(OpCode.OP_1 - 1))
             let n = opCodeNum - (OpCode.OP_1 - 1);
             let buf = new Bn(n).toScriptNumBuffer();
-            this.stack.push(buf);
+            this.stack.push(buf); // The result of these opCodes should always be the minimal way to push the data
+            // they push, so no need for a CheckMinimalPush here.
           }
           break;
+        //
+        // Control
+        //
 
         case OpCode.OP_NOP:
           break;
@@ -6071,6 +7056,7 @@ class Interp extends Struct {
         case OpCode.OP_CHECKLOCKTIMEVERIFY:
           {
             if (!(this.flags & Interp.SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY)) {
+              // not enabled; treat as a NOP2
               if (this.flags & Interp.SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_NOPS) {
                 this.errStr = 'SCRIPT_ERR_DISCOURAGE_UPGRADABLE_NOPS';
                 return false;
@@ -6082,16 +7068,33 @@ class Interp extends Struct {
             if (this.stack.length < 1) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
-            }
+            } // Note that elsewhere numeric opCodes are limited to
+            // operands in the range -2**31+1 to 2**31-1, however it is
+            // legal for opCodes to produce results exceeding that
+            // range. This limitation is implemented by CScriptNum's
+            // default 4-byte limit.
+            //
+            // If we kept to that limit we'd have a year 2038 problem,
+            // even though the nLockTime field in transactions
+            // themselves is uint32 which only becomes meaningless
+            // after the year 2106.
+            //
+            // Thus as a special case we tell CScriptNum to accept up
+            // to 5-byte bignums, which are good until 2**39-1, well
+            // beyond the 2**32-1 limit of the nLockTime field itself.
+
 
             let nLockTimebuf = this.stack[this.stack.length - 1];
             let nLockTimebn = new Bn().fromScriptNumBuffer(nLockTimebuf, fRequireMinimal, 5);
-            let nLockTime = nLockTimebn.toNumber();
+            let nLockTime = nLockTimebn.toNumber(); // In the rare event that the argument may be < 0 due to
+            // some arithmetic being done first, you can always use
+            // 0 MAX CHECKLOCKTIMEVERIFY.
 
             if (nLockTime < 0) {
               this.errStr = 'SCRIPT_ERR_NEGATIVE_LOCKTIME';
               return false;
-            }
+            } // Actually compare the specified lock time with the transaction.
+
 
             if (!this.checkLockTime(nLockTime)) {
               this.errStr = 'SCRIPT_ERR_UNSATISFIED_LOCKTIME';
@@ -6103,6 +7106,7 @@ class Interp extends Struct {
         case OpCode.OP_CHECKSEQUENCEVERIFY:
           {
             if (!(this.flags & Interp.SCRIPT_VERIFY_CHECKSEQUENCEVERIFY)) {
+              // not enabled; treat as a NOP3
               if (this.flags & Interp.SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_NOPS) {
                 this.errStr = 'SCRIPT_ERR_DISCOURAGE_UPGRADABLE_NOPS';
                 return false;
@@ -6114,20 +7118,29 @@ class Interp extends Struct {
             if (this.stack.length < 1) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
-            }
+            } // nSequence, like nLockTime, is a 32-bit unsigned integer
+            // field. See the comment in CHECKLOCKTIMEVERIFY regarding
+            // 5-byte numeric operands.
+
 
             let nSequencebuf = this.stack[this.stack.length - 1];
             let nSequencebn = new Bn().fromScriptNumBuffer(nSequencebuf, fRequireMinimal, 5);
-            let nSequence = nSequencebn.toNumber();
+            let nSequence = nSequencebn.toNumber(); // In the rare event that the argument may be < 0 due to
+            // some arithmetic being done first, you can always use
+            // 0 MAX CHECKSEQUENCEVERIFY.
 
             if (nSequence < 0) {
               this.errStr = 'SCRIPT_ERR_NEGATIVE_LOCKTIME';
               return false;
-            }
+            } // To provide for future soft-fork extensibility, if the
+            // operand has the disabled lock-time flag set,
+            // CHECKSEQUENCEVERIFY behaves as a NOP.
+
 
             if ((nSequence & TxIn.SEQUENCE_LOCKTIME_DISABLE_FLAG) !== 0) {
               break;
-            }
+            } // Compare the specified sequence number with the input.
+
 
             if (!this.checkSequence(nSequence)) {
               this.errStr = 'SCRIPT_ERR_UNSATISFIED_LOCKTIME';
@@ -6155,6 +7168,8 @@ class Interp extends Struct {
         case OpCode.OP_IF:
         case OpCode.OP_NOTIF:
           {
+            // <expression> if [statements] [else [statements]] endif
+            // bool fValue = false
             let fValue = false;
 
             if (fExec) {
@@ -6195,6 +7210,8 @@ class Interp extends Struct {
 
         case OpCode.OP_VERIFY:
           {
+            // (true -- ) or
+            // (false -- false) and return
             if (this.stack.length < 1) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
@@ -6217,6 +7234,10 @@ class Interp extends Struct {
             this.errStr = 'SCRIPT_ERR_OP_RETURN';
             return false;
           }
+        // unreachable code: break
+        //
+        // Stack ops
+        //
 
         case OpCode.OP_TOALTSTACK:
           if (this.stack.length < 1) {
@@ -6237,6 +7258,7 @@ class Interp extends Struct {
           break;
 
         case OpCode.OP_2DROP:
+          // (x1 x2 -- )
           if (this.stack.length < 2) {
             this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
             return false;
@@ -6248,6 +7270,7 @@ class Interp extends Struct {
 
         case OpCode.OP_2DUP:
           {
+            // (x1 x2 -- x1 x2 x1 x2)
             if (this.stack.length < 2) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
@@ -6262,6 +7285,7 @@ class Interp extends Struct {
 
         case OpCode.OP_3DUP:
           {
+            // (x1 x2 x3 -- x1 x2 x3 x1 x2 x3)
             if (this.stack.length < 3) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
@@ -6278,6 +7302,7 @@ class Interp extends Struct {
 
         case OpCode.OP_2OVER:
           {
+            // (x1 x2 x3 x4 -- x1 x2 x3 x4 x1 x2)
             if (this.stack.length < 4) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
@@ -6292,6 +7317,7 @@ class Interp extends Struct {
 
         case OpCode.OP_2ROT:
           {
+            // (x1 x2 x3 x4 x5 x6 -- x3 x4 x5 x6 x1 x2)
             if (this.stack.length < 6) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
@@ -6305,6 +7331,7 @@ class Interp extends Struct {
 
         case OpCode.OP_2SWAP:
           {
+            // (x1 x2 x3 x4 -- x3 x4 x1 x2)
             if (this.stack.length < 4) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
@@ -6318,6 +7345,7 @@ class Interp extends Struct {
 
         case OpCode.OP_IFDUP:
           {
+            // (x - 0 | x x)
             if (this.stack.length < 1) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
@@ -6334,12 +7362,14 @@ class Interp extends Struct {
 
         case OpCode.OP_DEPTH:
           {
+            // -- stacksize
             let buf = new Bn(this.stack.length).toScriptNumBuffer();
             this.stack.push(buf);
           }
           break;
 
         case OpCode.OP_DROP:
+          // (x -- )
           if (this.stack.length < 1) {
             this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
             return false;
@@ -6349,6 +7379,7 @@ class Interp extends Struct {
           break;
 
         case OpCode.OP_DUP:
+          // (x -- x x)
           if (this.stack.length < 1) {
             this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
             return false;
@@ -6358,6 +7389,7 @@ class Interp extends Struct {
           break;
 
         case OpCode.OP_NIP:
+          // (x1 x2 -- x2)
           if (this.stack.length < 2) {
             this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
             return false;
@@ -6367,6 +7399,7 @@ class Interp extends Struct {
           break;
 
         case OpCode.OP_OVER:
+          // (x1 x2 -- x1 x2 x1)
           if (this.stack.length < 2) {
             this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
             return false;
@@ -6378,6 +7411,8 @@ class Interp extends Struct {
         case OpCode.OP_PICK:
         case OpCode.OP_ROLL:
           {
+            // (xn ... x2 x1 x0 n - xn ... x2 x1 x0 xn)
+            // (xn ... x2 x1 x0 n - ... x2 x1 x0 xn)
             if (this.stack.length < 2) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
@@ -6405,6 +7440,9 @@ class Interp extends Struct {
 
         case OpCode.OP_ROT:
           {
+            // (x1 x2 x3 -- x2 x3 x1)
+            //  x2 x1 x3  after first swap
+            //  x2 x3 x1  after second swap
             if (this.stack.length < 3) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
@@ -6421,6 +7459,7 @@ class Interp extends Struct {
 
         case OpCode.OP_SWAP:
           {
+            // (x1 x2 -- x2 x1)
             if (this.stack.length < 2) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
@@ -6434,6 +7473,7 @@ class Interp extends Struct {
           break;
 
         case OpCode.OP_TUCK:
+          // (x1 x2 -- x2 x1 x2)
           if (this.stack.length < 2) {
             this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
             return false;
@@ -6444,6 +7484,7 @@ class Interp extends Struct {
 
         case OpCode.OP_SIZE:
           {
+            // (in -- in size)
             if (this.stack.length < 1) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
@@ -6453,10 +7494,15 @@ class Interp extends Struct {
             this.stack.push(bn.toScriptNumBuffer());
           }
           break;
+        //
+        // Bitwise logic
+        //
 
         case OpCode.OP_EQUAL:
         case OpCode.OP_EQUALVERIFY:
+          // case OpCode.OP_NOTEQUAL: // use OpCode.OP_NUMNOTEQUAL
           {
+            // (x1 x2 - bool)
             if (this.stack.length < 2) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
@@ -6464,7 +7510,12 @@ class Interp extends Struct {
 
             let buf1 = this.stack[this.stack.length - 2];
             let buf2 = this.stack[this.stack.length - 1];
-            let fEqual = cmp(buf1, buf2);
+            let fEqual = cmp(buf1, buf2); // OpCode.OP_NOTEQUAL is disabled because it would be too easy to say
+            // something like n != 1 and have some wiseguy pass in 1 with extra
+            // zero bytes after it (numerically, 0x01 == 0x0001 == 0x000001)
+            // if (opCode == OpCode.OP_NOTEQUAL)
+            //  fEqual = !fEqual
+
             this.stack.pop();
             this.stack.pop();
             this.stack.push(fEqual ? Interp.true : Interp.false);
@@ -6479,6 +7530,9 @@ class Interp extends Struct {
             }
           }
           break;
+        //
+        // Numeric
+        //
 
         case OpCode.OP_1ADD:
         case OpCode.OP_1SUB:
@@ -6487,6 +7541,7 @@ class Interp extends Struct {
         case OpCode.OP_NOT:
         case OpCode.OP_0NOTEQUAL:
           {
+            // (in -- out)
             if (this.stack.length < 1) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
@@ -6519,6 +7574,7 @@ class Interp extends Struct {
               case OpCode.OP_0NOTEQUAL:
                 bn = new Bn(bn.neq(0) + 0);
                 break;
+              // default:      assert(!"invalid opCode"); break; // TODO: does this ever occur?
             }
 
             this.stack.pop();
@@ -6540,6 +7596,7 @@ class Interp extends Struct {
         case OpCode.OP_MIN:
         case OpCode.OP_MAX:
           {
+            // (x1 x2 -- out)
             if (this.stack.length < 2) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
@@ -6557,38 +7614,47 @@ class Interp extends Struct {
               case OpCode.OP_SUB:
                 bn = bn1.sub(bn2);
                 break;
+              // case OpCode.OP_BOOLAND:       bn = (bn1 != bnZero && bn2 != bnZero); break
 
               case OpCode.OP_BOOLAND:
                 bn = new Bn((bn1.neq(0) && bn2.neq(0)) + 0);
                 break;
+              // case OpCode.OP_BOOLOR:        bn = (bn1 != bnZero || bn2 != bnZero); break
 
               case OpCode.OP_BOOLOR:
                 bn = new Bn((bn1.neq(0) || bn2.neq(0)) + 0);
                 break;
+              // case OpCode.OP_NUMEQUAL:      bn = (bn1 == bn2); break
 
               case OpCode.OP_NUMEQUAL:
                 bn = new Bn(bn1.eq(bn2) + 0);
                 break;
+              // case OpCode.OP_NUMEQUALVERIFY:    bn = (bn1 == bn2); break
 
               case OpCode.OP_NUMEQUALVERIFY:
                 bn = new Bn(bn1.eq(bn2) + 0);
                 break;
+              // case OpCode.OP_NUMNOTEQUAL:     bn = (bn1 != bn2); break
 
               case OpCode.OP_NUMNOTEQUAL:
                 bn = new Bn(bn1.neq(bn2) + 0);
                 break;
+              // case OpCode.OP_LESSTHAN:      bn = (bn1 < bn2); break
 
               case OpCode.OP_LESSTHAN:
                 bn = new Bn(bn1.lt(bn2) + 0);
                 break;
+              // case OpCode.OP_GREATERTHAN:     bn = (bn1 > bn2); break
 
               case OpCode.OP_GREATERTHAN:
                 bn = new Bn(bn1.gt(bn2) + 0);
                 break;
+              // case OpCode.OP_LESSTHANOREQUAL:   bn = (bn1 <= bn2); break
 
               case OpCode.OP_LESSTHANOREQUAL:
                 bn = new Bn(bn1.leq(bn2) + 0);
                 break;
+              // case OpCode.OP_GREATERTHANOREQUAL:  bn = (bn1 >= bn2); break
 
               case OpCode.OP_GREATERTHANOREQUAL:
                 bn = new Bn(bn1.geq(bn2) + 0);
@@ -6601,6 +7667,7 @@ class Interp extends Struct {
               case OpCode.OP_MAX:
                 bn = bn1.gt(bn2) ? bn1 : bn2;
                 break;
+              // default:           assert(!"invalid opCode"); break; //TODO: does this ever occur?
             }
 
             this.stack.pop();
@@ -6608,6 +7675,7 @@ class Interp extends Struct {
             this.stack.push(bn.toScriptNumBuffer());
 
             if (opCodeNum === OpCode.OP_NUMEQUALVERIFY) {
+              // if (CastToBool(stacktop(-1)))
               if (Interp.castToBool(this.stack[this.stack.length - 1])) {
                 this.stack.pop();
               } else {
@@ -6620,6 +7688,7 @@ class Interp extends Struct {
 
         case OpCode.OP_WITHIN:
           {
+            // (x min max -- out)
             if (this.stack.length < 3) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
@@ -6627,7 +7696,8 @@ class Interp extends Struct {
 
             let bn1 = new Bn().fromScriptNumBuffer(this.stack[this.stack.length - 3], fRequireMinimal);
             let bn2 = new Bn().fromScriptNumBuffer(this.stack[this.stack.length - 2], fRequireMinimal);
-            let bn3 = new Bn().fromScriptNumBuffer(this.stack[this.stack.length - 1], fRequireMinimal);
+            let bn3 = new Bn().fromScriptNumBuffer(this.stack[this.stack.length - 1], fRequireMinimal); // bool fValue = (bn2 <= bn1 && bn1 < bn3)
+
             let fValue = bn2.leq(bn1) && bn1.lt(bn3);
             this.stack.pop();
             this.stack.pop();
@@ -6635,6 +7705,9 @@ class Interp extends Struct {
             this.stack.push(fValue ? Interp.true : Interp.false);
           }
           break;
+        //
+        // Crypto
+        //
 
         case OpCode.OP_RIPEMD160:
         case OpCode.OP_SHA1:
@@ -6642,12 +7715,14 @@ class Interp extends Struct {
         case OpCode.OP_HASH160:
         case OpCode.OP_HASH256:
           {
+            // (in -- hash)
             if (this.stack.length < 1) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
             }
 
-            let buf = this.stack[this.stack.length - 1];
+            let buf = this.stack[this.stack.length - 1]; // valtype vchnew Hash((opCode == OpCode.OP_RIPEMD160 || opCode == OpCode.OP_SHA1 || opCode == OpCode.OP_HASH160) ? 20 : 32)
+
             let bufHash;
 
             if (opCodeNum === OpCode.OP_RIPEMD160) {
@@ -6668,22 +7743,27 @@ class Interp extends Struct {
           break;
 
         case OpCode.OP_CODESEPARATOR:
+          // Hash starts after the code separator
           this.pBeginCodeHash = this.pc;
           break;
 
         case OpCode.OP_CHECKSIG:
         case OpCode.OP_CHECKSIGVERIFY:
           {
+            // (sig pubKey -- bool)
             if (this.stack.length < 2) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
             }
 
             let bufSig = this.stack[this.stack.length - 2];
-            let bufPubKey = this.stack[this.stack.length - 1];
+            let bufPubKey = this.stack[this.stack.length - 1]; // Subset of script starting at the most recent codeseparator
+            // CScript scriptCode(pBeginCodeHash, pend)
+
             let subScript = new Script().fromObject({
               chunks: this.script.chunks.slice(this.pBeginCodeHash)
-            });
+            }); // https://github.com/Bitcoin-UAHF/spec/blob/master/replay-protected-sighash.md
+
             let nHashType = bufSig.length > 0 ? bufSig.readUInt8(bufSig.length - 1) : 0;
 
             if (nHashType & Sig.SIGHASH_FORKID) {
@@ -6696,6 +7776,7 @@ class Interp extends Struct {
             }
 
             if (!this.checkSigEncoding(bufSig) || !this.checkPubKeyEncoding(bufPubKey)) {
+              // serror is set
               return false;
             }
 
@@ -6706,11 +7787,13 @@ class Interp extends Struct {
               let pubKey = new PubKey().fromBuffer(bufPubKey, false);
               fSuccess = this.tx.verify(sig, pubKey, this.nIn, subScript, Boolean(this.flags & Interp.SCRIPT_VERIFY_LOW_S), this.valueBn, this.flags);
             } catch (e) {
+              // invalid sig or pubKey
               fSuccess = false;
             }
 
             this.stack.pop();
-            this.stack.pop();
+            this.stack.pop(); // stack.push_back(fSuccess ? vchTrue : vchFalse)
+
             this.stack.push(fSuccess ? Interp.true : Interp.false);
 
             if (opCodeNum === OpCode.OP_CHECKSIGVERIFY) {
@@ -6727,6 +7810,7 @@ class Interp extends Struct {
         case OpCode.OP_CHECKMULTISIG:
         case OpCode.OP_CHECKMULTISIGVERIFY:
           {
+            // ([sig ...] num_of_signatures [pubKey ...] num_of_pubKeys -- bool)
             let i = 1;
 
             if (this.stack.length < i) {
@@ -6746,7 +7830,8 @@ class Interp extends Struct {
             if (this.nOpCount > 201) {
               this.errStr = 'SCRIPT_ERR_OP_COUNT';
               return false;
-            }
+            } // int ikey = ++i
+
 
             let ikey = ++i;
             i += nKeysCount;
@@ -6761,7 +7846,8 @@ class Interp extends Struct {
             if (nSigsCount < 0 || nSigsCount > nKeysCount) {
               this.errStr = 'SCRIPT_ERR_SIG_COUNT';
               return false;
-            }
+            } // int isig = ++i
+
 
             let isig = ++i;
             i += nSigsCount;
@@ -6769,14 +7855,16 @@ class Interp extends Struct {
             if (this.stack.length < i) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
               return false;
-            }
+            } // Subset of script starting at the most recent codeseparator
+
 
             let subScript = new Script().fromObject({
               chunks: this.script.chunks.slice(this.pBeginCodeHash)
             });
 
             for (let k = 0; k < nSigsCount; k++) {
-              let bufSig = this.stack[this.stack.length - isig - k];
+              let bufSig = this.stack[this.stack.length - isig - k]; // https://github.com/Bitcoin-UAHF/spec/blob/master/replay-protected-sighash.md
+
               let nHashType = bufSig.length > 0 ? bufSig.readUInt8(bufSig.length - 1) : 0;
 
               if (nHashType & Sig.SIGHASH_FORKID) {
@@ -6785,6 +7873,7 @@ class Interp extends Struct {
                   return false;
                 }
               } else {
+                // Drop the signature, since there's no way for a signature to sign itself
                 subScript.findAndDelete(new Script().writeBuffer(bufSig));
               }
             }
@@ -6792,10 +7881,13 @@ class Interp extends Struct {
             let fSuccess = true;
 
             while (fSuccess && nSigsCount > 0) {
-              let bufSig = this.stack[this.stack.length - isig];
+              // valtype& vchSig  = stacktop(-isig)
+              let bufSig = this.stack[this.stack.length - isig]; // valtype& vchPubKey = stacktop(-ikey)
+
               let bufPubKey = this.stack[this.stack.length - ikey];
 
               if (!this.checkSigEncoding(bufSig) || !this.checkPubKeyEncoding(bufPubKey)) {
+                // serror is set
                 return false;
               }
 
@@ -6806,6 +7898,7 @@ class Interp extends Struct {
                 let pubKey = new PubKey().fromBuffer(bufPubKey, false);
                 fOk = this.tx.verify(sig, pubKey, this.nIn, subScript, Boolean(this.flags & Interp.SCRIPT_VERIFY_LOW_S), this.valueBn, this.flags);
               } catch (e) {
+                // invalid sig or pubKey
                 fOk = false;
               }
 
@@ -6815,16 +7908,24 @@ class Interp extends Struct {
               }
 
               ikey++;
-              nKeysCount--;
+              nKeysCount--; // If there are more signatures left than keys left,
+              // then too many signatures have failed
 
               if (nSigsCount > nKeysCount) {
                 fSuccess = false;
               }
-            }
+            } // Clean up stack of actual arguments
+
 
             while (i-- > 1) {
               this.stack.pop();
-            }
+            } // A bug causes CHECKMULTISIG to consume one extra argument
+            // whose contents were not checked in any way.
+            //
+            // Unfortunately this is a potential source of mutability,
+            // so optionally verify it is exactly equal to zero prior
+            // to removing it from the stack.
+
 
             if (this.stack.length < 1) {
               this.errStr = 'SCRIPT_ERR_INVALID_STACK_OPERATION';
@@ -6836,7 +7937,8 @@ class Interp extends Struct {
               return false;
             }
 
-            this.stack.pop();
+            this.stack.pop(); // stack.push_back(fSuccess ? vchTrue : vchFalse)
+
             this.stack.push(fSuccess ? Interp.true : Interp.false);
 
             if (opCodeNum === OpCode.OP_CHECKMULTISIGVERIFY) {
@@ -6858,6 +7960,13 @@ class Interp extends Struct {
 
     return true;
   }
+  /**
+   * This function has the same interface as bitcoin core's VerifyScript and is
+   * the function you want to use to know if a particular input in a
+   * transaction is valid or not. It simply iterates over the results generated
+   * by the results method.
+   */
+
 
   verify(scriptSig, scriptPubKey, tx, nIn, flags, valueBn) {
     let results = this.results(scriptSig, scriptPubKey, tx, nIn, flags, valueBn);
@@ -6870,6 +7979,20 @@ class Interp extends Struct {
 
     return true;
   }
+  /**
+   * Gives you the results of the execution each operation of the scripSig and
+   * scriptPubKey corresponding to a particular input (nIn) for the concerned
+   * transaction (tx). Each result can be either true or false. If true, then
+   * the operation did not invalidate the transaction. If false, then the
+   * operation has invalidated the script, and the transaction is not valid.
+   * flags is a number that can pass in some special flags, such as whether or
+   * not to execute the redeemScript in a p2sh transaction.
+   *
+   * This method is translated from bitcoin core's VerifyScript.  This function
+   * is a generator, thus you can and need to iterate through it.  To
+   * automatically return true or false, use the verify method.
+   */
+
 
   *results(scriptSig, scriptPubKey, tx, nIn, flags, valueBn) {
     let stackCopy;
@@ -6914,17 +8037,22 @@ class Interp extends Struct {
     if (!Interp.castToBool(buf)) {
       this.errStr = this.errStr || 'SCRIPT_ERR_EVAL_FALSE';
       yield false;
-    }
+    } // Additional validation for spend-to-script-hash transactions:
+
 
     if (flags & Interp.SCRIPT_VERIFY_P2SH && scriptPubKey.isScriptHashOut()) {
+      // scriptSig must be literals-only or validation fails
       if (!scriptSig.isPushOnly()) {
         this.errStr = this.errStr || 'SCRIPT_ERR_SIG_PUSHONLY';
         yield false;
-      }
+      } // Restore stack.
+
 
       let tmp = stack;
       stack = stackCopy;
-      stackCopy = tmp;
+      stackCopy = tmp; // stack cannot be empty here, because if it was the
+      // P2SH  HASH <> EQUAL  scriptPubKey would be evaluated with
+      // an empty stack and the EvalScript above would yield false.
 
       if (stack.length === 0) {
         throw new Error('internal error - stack copy empty');
@@ -6955,9 +8083,15 @@ class Interp extends Struct {
       } else {
         yield true;
       }
-    }
+    } // The CLEANSTACK check is only performed after potential P2SH evaluation,
+    // as the non-P2SH evaluation of a P2SH script will obviously not result in
+    // a clean stack (the P2SH inputs remain).
+
 
     if ((flags & Interp.SCRIPT_VERIFY_CLEANSTACK) !== 0) {
+      // Disallow CLEANSTACK without P2SH, as otherwise a switch
+      // CLEANSTACK->P2SH+CLEANSTACK would be possible, which is not a softfork
+      // (and P2SH should be one).
       if (!(flags & Interp.SCRIPT_VERIFY_P2SH)) {
         throw new Error('cannot use CLEANSTACK without P2SH');
       }
@@ -6970,9 +8104,17 @@ class Interp extends Struct {
 
     yield true;
   }
+  /**
+   * If the script has failed, this methods returns valuable debug
+   * information about exactly where the script failed. It is a
+   * JSON-compatible object so it can be easily stringified. pc refers to the
+   * currently executing opcode.
+   */
+
 
   getDebugObject() {
-    let pc = this.pc - 1;
+    let pc = this.pc - 1; // pc is incremented immediately after getting
+
     return {
       errStr: this.errStr,
       scriptStr: this.script ? this.script.toString() : 'no script found',
@@ -6992,21 +8134,97 @@ class Interp extends Struct {
 Interp.true = Buffer.from([1]);
 Interp.false = Buffer.from([]);
 Interp.MAX_SCRIPT_ELEMENT_SIZE = 520;
-Interp.LOCKTIME_THRESHOLD = 500000000;
-Interp.SCRIPT_VERIFY_NONE = 0;
-Interp.SCRIPT_VERIFY_P2SH = 1 << 0;
-Interp.SCRIPT_VERIFY_STRICTENC = 1 << 1;
-Interp.SCRIPT_VERIFY_DERSIG = 1 << 2;
-Interp.SCRIPT_VERIFY_LOW_S = 1 << 3;
-Interp.SCRIPT_VERIFY_NULLDUMMY = 1 << 4;
-Interp.SCRIPT_VERIFY_SIGPUSHONLY = 1 << 5;
-Interp.SCRIPT_VERIFY_MINIMALDATA = 1 << 6;
-Interp.SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_NOPS = 1 << 7;
-Interp.SCRIPT_VERIFY_CLEANSTACK = 1 << 8;
-Interp.SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY = 1 << 9;
-Interp.SCRIPT_VERIFY_CHECKSEQUENCEVERIFY = 1 << 10;
-Interp.SCRIPT_ENABLE_SIGHASH_FORKID = 1 << 16;
-Interp.defaultFlags = Interp.SCRIPT_VERIFY_P2SH | Interp.SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY;
+Interp.LOCKTIME_THRESHOLD = 500000000; // Tue Nov  5 00:53:20 1985 UTC
+// flags taken from bitcoin core
+// bitcoin core commit: b5d1b1092998bc95313856d535c632ea5a8f9104
+
+Interp.SCRIPT_VERIFY_NONE = 0; // Evaluate P2SH subScripts (softfork safe, Bip16).
+
+Interp.SCRIPT_VERIFY_P2SH = 1 << 0; // Passing a non-strict-DER signature or one with undefined hashtype to a checksig operation causes script failure.
+// Passing a pubKey that is not (0x04 + 64 bytes) or (0x02 or 0x03 + 32 bytes) to checksig causes that pubKey to be
+// skipped (not softfork safe: this flag can widen the validity of OP_CHECKSIG OP_NOT).
+
+Interp.SCRIPT_VERIFY_STRICTENC = 1 << 1; // Passing a non-strict-DER signature to a checksig operation causes script failure (softfork safe, Bip62 rule 1)
+
+Interp.SCRIPT_VERIFY_DERSIG = 1 << 2; // Passing a non-strict-DER signature or one with S > order/2 to a checksig operation causes script failure
+// (softfork safe, Bip62 rule 5).
+
+Interp.SCRIPT_VERIFY_LOW_S = 1 << 3; // verify dummy stack item consumed by CHECKMULTISIG is of zero-length (softfork safe, Bip62 rule 7).
+
+Interp.SCRIPT_VERIFY_NULLDUMMY = 1 << 4; // Using a non-push operator in the scriptSig causes script failure (softfork safe, Bip62 rule 2).
+
+Interp.SCRIPT_VERIFY_SIGPUSHONLY = 1 << 5; // Require minimal encodings for all push operations (OP_0... OP_16, OP_1NEGATE where possible, direct
+// pushes up to 75 bytes, OP_PUSHDATA up to 255 bytes, OP_PUSHDATA2 for anything larger). Evaluating
+// any other push causes the script to fail (Bip62 rule 3).
+// In addition, whenever a stack element is interpreted as a number, it must be of minimal length (Bip62 rule 4).
+// (softfork safe)
+
+Interp.SCRIPT_VERIFY_MINIMALDATA = 1 << 6; // Discourage use of NOPs reserved for upgrades (NOP1-10)
+//
+// Provided so that nodes can avoid accepting or mining transactions
+// containing executed NOP's whose meaning may change after a soft-fork,
+// thus rendering the script invalid; with this flag set executing
+// discouraged NOPs fails the script. This verification flag will never be
+// a mandatory flag applied to scripts in a block. NOPs that are not
+// executed, e.g.  within an unexecuted IF ENDIF block, are *not* rejected.
+
+Interp.SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_NOPS = 1 << 7; // Require that only a single stack element remains after evaluation. This
+// changes the success criterion from "At least one stack element must
+// remain, and when interpreted as a boolean, it must be true" to "Exactly
+// one stack element must remain, and when interpreted as a boolean, it must
+// be true".  (softfork safe, Bip62 rule 6)
+// Note: CLEANSTACK should never be used without P2SH.
+
+Interp.SCRIPT_VERIFY_CLEANSTACK = 1 << 8; // Verify CHECKLOCKTIMEVERIFY
+//
+// See Bip65 for details.
+
+Interp.SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY = 1 << 9; // support CHECKSEQUENCEVERIFY opCode
+//
+// See Bip112 for details
+
+Interp.SCRIPT_VERIFY_CHECKSEQUENCEVERIFY = 1 << 10; // used for UAHF
+// https://github.com/Bitcoin-UAHF/spec/blob/master/replay-protected-sighash.md
+
+Interp.SCRIPT_ENABLE_SIGHASH_FORKID = 1 << 16; // These are the things we wish to verify by default. At the time of writing,
+// P2SH and CHECKLOCKTIMEVERIFY are both active, but CHECKSEQUENCEVERIFY is
+// not.
+
+Interp.defaultFlags = Interp.SCRIPT_VERIFY_P2SH | Interp.SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY; // Interp.defaultFlags = Interp.SCRIPT_VERIFY_P2SH | Interp.SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY | Interp.SCRIPT_VERIFY_CHECKSEQUENCEVERIFY
+
+function _extends() {
+  _extends = Object.assign || function (target) {
+    for (var i = 1; i < arguments.length; i++) {
+      var source = arguments[i];
+
+      for (var key in source) {
+        if (Object.prototype.hasOwnProperty.call(source, key)) {
+          target[key] = source[key];
+        }
+      }
+    }
+
+    return target;
+  };
+
+  return _extends.apply(this, arguments);
+}
+
+/**
+ * PubKey Map
+ * ==========
+ *
+ * A map from (transaction hash, output number) to (script chunk index, pubKey).
+ * Whening signing a bitcoin transaction, we need to be able to sign an input
+ * with the correct key and also we need to know where to put signature when we
+ * get it. This mapping allows us to find the key for an associated input (which
+ * is identified by tx output hash and number) with which to sign the
+ * transaction and then also to know where to insert the signature into the
+ * input script. This gets us the public key, and we need a different method to
+ * get the private key. That is because we often know the public key to be used
+ * but may not have access to the private key until the entire tx is sent to
+ * where the private keys are.
+ */
 
 class SigOperations extends Struct {
   constructor(map = new Map()) {
@@ -7021,6 +8239,7 @@ class SigOperations extends Struct {
       json[label] = arr.map(obj => ({
         nScriptChunk: obj.nScriptChunk,
         type: obj.type,
+        // 'sig' or 'pubKey'
         addressStr: obj.addressStr,
         nHashType: obj.nHashType,
         log: obj.log
@@ -7041,6 +8260,20 @@ class SigOperations extends Struct {
     });
     return this;
   }
+  /**
+   * Set an address to in the map for use with single-sig.
+   *
+   * @param {Buffer} txHashBuf The hash of a transsaction. Note that this is
+   * *not* the reversed transaction id, but is the raw hash.
+   * @param {Number} txOutNum The output number, a.k.a. the "vout".
+   * @param {Number} nScriptChunk The index of the chunk of the script where
+   * we are going to place the signature.
+   * @param {String} addressStr The addressStr coresponding to this (txHashBuf,
+   * txOutNum, nScriptChunk) where we are going to sign and insert the
+   * signature or public key.
+   * @param {Number} nHashType Usually = Sig.SIGHASH_ALL | Sig.SIGHASH_FORKID
+   */
+
 
   setOne(txHashBuf, txOutNum, nScriptChunk, type = 'sig', addressStr, nHashType = Sig.SIGHASH_ALL | Sig.SIGHASH_FORKID) {
     const label = txHashBuf.toString('hex') + ':' + txOutNum;
@@ -7053,14 +8286,22 @@ class SigOperations extends Struct {
     this.map.set(label, [obj]);
     return this;
   }
+  /**
+   * Set a bunch of addresses for signing an input such as for use with multi-sig.
+   *
+   * @param {Buffer} txHashBuf The hash of a transsaction. Note that this is
+   * *not* the reversed transaction id, but is the raw hash.
+   * @param {Number} txOutNum The output number, a.k.a. the "vout".
+   * @param {Array} arr Must take the form of [{nScriptChunk, type, addressStr, nHashType}, ...]
+   */
+
 
   setMany(txHashBuf, txOutNum, arr) {
     const label = txHashBuf.toString('hex') + ':' + txOutNum;
-    arr = arr.map(obj => ({
+    arr = arr.map(obj => _extends({
       type: obj.type || 'sig',
-      nHashType: obj.nHashType || Sig.SIGHASH_ALL | Sig.SIGHASH_FORKID,
-      ...obj
-    }));
+      nHashType: obj.nHashType || Sig.SIGHASH_ALL | Sig.SIGHASH_FORKID
+    }, obj));
     this.map.set(label, arr);
     return this;
   }
@@ -7076,6 +8317,17 @@ class SigOperations extends Struct {
     this.setMany(txHashBuf, txOutNum, arr);
     return this;
   }
+  /**
+   * Get an address from the map
+   *
+   * @param {Buffer} txHashBuf The hash of a transction. Note that this is *not*
+   * the reversed transaction id, but is the raw hash.
+   * @param {Number} txOutNum The output number, a.k.a. the "vout".
+   * @param {Number} nScriptChunk The index of the chunk of the script where
+   * we are going to place the signature.
+   * @returns {PubKey}
+   */
+
 
   get(txHashBuf, txOutNum) {
     const label = txHashBuf.toString('hex') + ':' + txOutNum;
@@ -7083,6 +8335,17 @@ class SigOperations extends Struct {
   }
 
 }
+
+/**
+ * Transaction Output Map
+ * ======================
+ *
+ * A map from a transaction hash and output number to that particular output.
+ * Note that the map is from the transaction *hash*, which is the value that
+ * occurs in the blockchain, not the id, which is the reverse of the hash. The
+ * TxOutMap is necessary when signing a transction to get the script and value
+ * of that output which is plugged into the sighash algorithm.
+ */
 
 class TxOutMap extends Struct {
   constructor(map = new Map()) {
@@ -7128,6 +8391,10 @@ class TxOutMap extends Struct {
 
 }
 
+/**
+ * Transaction Builder
+ * ===================
+ */
 const Constants$1 = Constants.Default.TxBuilder;
 
 class TxBuilder extends Struct {
@@ -7204,6 +8471,10 @@ class TxBuilder extends Struct {
     this.changeScript = changeScript;
     return this;
   }
+  /**
+     * nLockTime is an unsigned integer.
+     */
+
 
   setNLocktime(nLockTime) {
     this.nLockTime = nLockTime;
@@ -7214,16 +8485,40 @@ class TxBuilder extends Struct {
     this.versionBytesNum = versionBytesNum;
     return this;
   }
+  /**
+     * Sometimes one of your outputs or the change output will be less than
+     * dust. Values less than dust cannot be broadcast. If you are OK with
+     * sending dust amounts to fees, then set this value to true.
+     */
+
 
   setDust(dust = Constants$1.dust) {
     this.dust = dust;
     return this;
   }
+  /**
+     * Sometimes one of your outputs or the change output will be less than
+     * dust. Values less than dust cannot be broadcast. If you are OK with
+     * sending dust amounts to fees, then set this value to true. We
+     * preferentially send all dust to the change if possible. However, that
+     * might not be possible if the change itself is less than dust, in which
+     * case all dust goes to fees.
+     */
+
 
   sendDustChangeToFees(dustChangeToFees = false) {
     this.dustChangeToFees = dustChangeToFees;
     return this;
   }
+  /**
+     * Import a transaction partially signed by someone else. The only thing you
+     * can do after this is sign one or more inputs. Usually used for multisig
+     * transactions. uTxOutMap is optional. It is not necessary so long as you
+     * pass in the txOut when you sign. You need to know the output when signing
+     * an input, including the script in the output, which is why this is
+     * necessary when signing an input.
+     */
+
 
   importPartiallySignedTx(tx, uTxOutMap = this.uTxOutMap, sigOperations = this.sigOperations) {
     this.tx = tx;
@@ -7231,6 +8526,10 @@ class TxBuilder extends Struct {
     this.sigOperations = sigOperations;
     return this;
   }
+  /**
+     * Pay "from" a script - in other words, add an input to the transaction.
+     */
+
 
   inputFromScript(txHashBuf, txOutNum, txOut, script, nSequence) {
     if (!Buffer.isBuffer(txHashBuf) || !(typeof txOutNum === 'number') || !(txOut instanceof TxOut) || !(script instanceof Script)) {
@@ -7246,6 +8545,11 @@ class TxBuilder extends Struct {
     this.sigOperations.addOne(txHashBuf, txOutNum, nScriptChunk, type, addressStr, nHashType);
     return this;
   }
+  /**
+     * Pay "from" a pubKeyHash output - in other words, add an input to the
+     * transaction.
+     */
+
 
   inputFromPubKeyHash(txHashBuf, txOutNum, txOut, pubKey, nSequence, nHashType) {
     if (!Buffer.isBuffer(txHashBuf) || typeof txOutNum !== 'number' || !(txOut instanceof TxOut)) {
@@ -7261,6 +8565,11 @@ class TxBuilder extends Struct {
     this.addSigOperation(txHashBuf, txOutNum, 1, 'pubKey', addressStr);
     return this;
   }
+  /**
+     * An address to send funds to, along with the amount. The amount should be
+     * denominated in satoshis, not bitcoins.
+     */
+
 
   outputToAddress(valueBn, addr) {
     if (!(addr instanceof Address) || !(valueBn instanceof Bn)) {
@@ -7271,6 +8580,11 @@ class TxBuilder extends Struct {
     this.outputToScript(valueBn, script);
     return this;
   }
+  /**
+     * A script to send funds to, along with the amount. The amount should be
+     * denominated in satoshis, not bitcoins.
+     */
+
 
   outputToScript(valueBn, script) {
     if (!(script instanceof Script) || !(valueBn instanceof Bn)) {
@@ -7317,10 +8631,16 @@ class TxBuilder extends Struct {
     }
 
     return inAmountBn;
-  }
+  } // Thanks to SigOperations, if those are accurately used, then we can
+  // accurately estimate what the size of the transaction is going to be once
+  // all the signatures and public keys are inserted.
+
 
   estimateSize() {
-    const sigSize = 1 + 1 + 1 + 1 + 32 + 1 + 1 + 32 + 1 + 1;
+    // largest possible sig size. final 1 is for pushdata at start. second to
+    // final is sighash byte. the rest are DER encoding.
+    const sigSize = 1 + 1 + 1 + 1 + 32 + 1 + 1 + 32 + 1 + 1; // length of script, y odd, x value - assumes compressed public key
+
     const pubKeySize = 1 + 1 + 33;
     let size = this.tx.toBuffer().length;
     this.tx.txIns.forEach(txIn => {
@@ -7346,15 +8666,29 @@ class TxBuilder extends Struct {
           throw new Error('unsupported sig operations type');
         }
       });
-    });
-    size = size + 1;
+    }); // size = size + sigSize * this.tx.txIns.length
+
+    size = size + 1; // assume txInsVi increases by 1 byte
+
     return Math.round(size);
   }
 
   estimateFee(extraFeeAmount = new Bn(0)) {
+    // old style rounding up per kb - pays too high fees:
+    // const fee = Math.ceil(this.estimateSize() / 1000) * this.feePerKbNum
+    // new style pays lower fees - rounds up to satoshi, not per kb:
     const fee = Math.ceil(this.estimateSize() / 1000 * this.feePerKbNum);
     return new Bn(fee).add(extraFeeAmount);
   }
+  /**
+     * Builds the transaction and adds the appropriate fee by subtracting from
+     * the change output. Note that by default the TxBuilder will use as many
+     * inputs as necessary to pay the output amounts and the required fee. The
+     * TxBuilder will not necessarily us all the inputs. To force the TxBuilder
+     * to use all the inputs (such as if you wish to spend the entire balance
+     * of a wallet), set the argument useAllInputs = true.
+     */
+
 
   build(opts = {
     useAllInputs: false
@@ -7384,7 +8718,8 @@ class TxBuilder extends Struct {
         } else {
           throw err;
         }
-      }
+      } // Set change amount from inAmountBn - outAmountBn
+
 
       this.changeAmountBn = inAmountBn.sub(outAmountBn);
       changeTxOut.valueBn = this.changeAmountBn;
@@ -7396,12 +8731,15 @@ class TxBuilder extends Struct {
     }
 
     if (this.changeAmountBn.geq(minFeeAmountBn)) {
+      // Subtract fee from change
       this.feeAmountBn = minFeeAmountBn;
       this.changeAmountBn = this.changeAmountBn.sub(this.feeAmountBn);
       this.tx.txOuts[this.tx.txOuts.length - 1].valueBn = this.changeAmountBn;
 
       if (this.changeAmountBn.lt(this.dust)) {
         if (this.dustChangeToFees) {
+          // Remove the change amount since it is less than dust and the
+          // builder has requested dust be sent to fees.
           this.tx.txOuts.pop();
           this.tx.txOutsVi = VarInt.fromNumber(this.tx.txOutsVi.toNumber() - 1);
           this.feeAmountBn = this.feeAmountBn.add(this.changeAmountBn);
@@ -7422,14 +8760,21 @@ class TxBuilder extends Struct {
     } else {
       throw new Error('unable to gather enough inputs for outputs and fee');
     }
-  }
+  } // BIP 69 sorting. call after build() but before sign()
+
 
   sort() {
     this.tx.sort();
     return this;
   }
+  /**
+     * Check if all signatures are present in a multisig input script.
+     */
+
 
   static allSigsPresent(m, script) {
+    // The first element is a Famous MultiSig Bug OP_0, and last element is the
+    // redeemScript. The rest are signatures.
     let present = 0;
 
     for (let i = 1; i < script.chunks.length - 1; i++) {
@@ -7440,13 +8785,19 @@ class TxBuilder extends Struct {
 
     return present === m;
   }
+  /**
+     * Remove blank signatures in a multisig input script.
+     */
+
 
   static removeBlankSigs(script) {
-    script = new Script(script.chunks.slice());
+    // The first element is a Famous MultiSig Bug OP_0, and last element is the
+    // redeemScript. The rest are signatures.
+    script = new Script(script.chunks.slice()); // copy the script
 
     for (let i = 1; i < script.chunks.length - 1; i++) {
       if (!script.chunks[i].buf) {
-        script.chunks.splice(i, 1);
+        script.chunks.splice(i, 1); // remove ith element
       }
     }
 
@@ -7459,8 +8810,17 @@ class TxBuilder extends Struct {
     txIn.scriptVi = VarInt.fromNumber(txIn.script.toBuffer().length);
     return this;
   }
+  /**
+     * Sign an input, but do not fill the signature into the transaction. Return
+     * the signature.
+     *
+     * For a normal transaction, subScript is usually the scriptPubKey. If
+     * you're not normal because you're using OP_CODESEPARATORs, you know what
+     * to do.
+     */
 
-  getSig(keyPair, nHashType = Sig.SIGHASH_ALL | Sig.SIGHASH_FORKID, nIn, subScript, flags = Tx.SCRIPT_ENABLE_SIGHASH_FORKID) {
+
+  getSig(keyPair, nHashType = Sig.SIGHASH_ALL | Sig.SIGHASH_FORKID, nIn, subScript, flags = Tx.SCRIPT_ENABLE_SIGHASH_FORKID, hashCache) {
     let valueBn;
 
     if (nHashType & Sig.SIGHASH_FORKID && flags & Tx.SCRIPT_ENABLE_SIGHASH_FORKID) {
@@ -7475,8 +8835,13 @@ class TxBuilder extends Struct {
       valueBn = txOut.valueBn;
     }
 
-    return this.tx.sign(keyPair, nHashType, nIn, subScript, valueBn, flags, this.hashCache);
+    return this.tx.sign(keyPair, nHashType, nIn, subScript, valueBn, flags, hashCache);
   }
+  /**
+     * Asynchronously sign an input in a worker, but do not fill the signature
+     * into the transaction. Return the signature.
+     */
+
 
   asyncGetSig(keyPair, nHashType = Sig.SIGHASH_ALL | Sig.SIGHASH_FORKID, nIn, subScript, flags = Tx.SCRIPT_ENABLE_SIGHASH_FORKID) {
     let valueBn;
@@ -7495,6 +8860,12 @@ class TxBuilder extends Struct {
 
     return this.tx.asyncSign(keyPair, nHashType, nIn, subScript, valueBn, flags, this.hashCache);
   }
+  /**
+     * Sign ith input with keyPair and insert the signature into the transaction.
+     * This method only works for some standard transaction types. For
+     * non-standard transaction types, use getSig.
+     */
+
 
   signTxIn(nIn, keyPair, txOut, nScriptChunk, nHashType = Sig.SIGHASH_ALL | Sig.SIGHASH_FORKID, flags = Tx.SCRIPT_ENABLE_SIGHASH_FORKID) {
     const txIn = this.tx.txIns[nIn];
@@ -7516,11 +8887,18 @@ class TxBuilder extends Struct {
     }
 
     const outScript = txOut.script;
-    const subScript = outScript;
+    const subScript = outScript; // true for standard script types
+
     const sig = this.getSig(keyPair, nHashType, nIn, subScript, flags, this.hashCache);
     this.fillSig(nIn, nScriptChunk, sig);
     return this;
   }
+  /**
+     * Asynchronously sign ith input with keyPair in a worker and insert the
+     * signature into the transaction.  This method only works for some standard
+     * transaction types. For non-standard transaction types, use asyncGetSig.
+     */
+
 
   async asyncSignTxIn(nIn, keyPair, txOut, nScriptChunk, nHashType = Sig.SIGHASH_ALL | Sig.SIGHASH_FORKID, flags = Tx.SCRIPT_ENABLE_SIGHASH_FORKID) {
     const txIn = this.tx.txIns[nIn];
@@ -7542,25 +8920,31 @@ class TxBuilder extends Struct {
     }
 
     const outScript = txOut.script;
-    const subScript = outScript;
+    const subScript = outScript; // true for standard script types
+
     const sig = await this.asyncGetSig(keyPair, nHashType, nIn, subScript, flags, this.hashCache);
     this.fillSig(nIn, nScriptChunk, sig);
     return this;
   }
 
   signWithKeyPairs(keyPairs) {
+    // produce map of addresses to private keys
     const addressStrMap = {};
 
     for (const keyPair of keyPairs) {
       const addressStr = Address.fromPubKey(keyPair.pubKey).toString();
       addressStrMap[addressStr] = keyPair;
-    }
+    } // loop through all inputs
+
 
     for (const nIn in this.tx.txIns) {
-      const txIn = this.tx.txIns[nIn];
+      const txIn = this.tx.txIns[nIn]; // for each input, use sigOperations to get list of signatures and pubkeys
+      // to be produced and inserted
+
       const arr = this.sigOperations.get(txIn.txHashBuf, txIn.txOutNum);
 
       for (const obj of arr) {
+        // for each pubkey, get the privkey from the privkey map and sign the input
         const {
           nScriptChunk,
           type,
@@ -7595,6 +8979,11 @@ class TxBuilder extends Struct {
 
 }
 
+/**
+ * Transaction Verifier
+ * ====================
+ */
+
 class TxVerifier extends Struct {
   constructor(tx, txOutMap, errStr, interp) {
     super({
@@ -7604,15 +8993,37 @@ class TxVerifier extends Struct {
       interp
     });
   }
+  /**
+     * Verifies that the transaction is valid both by performing basic checks, such
+     * as ensuring that no two inputs are the same, as well as by verifying every
+     * script. The two checks are checkStr, which is analagous to bitcoind's
+     * CheckTransaction, and verifyStr, which runs the script interpreter.
+     *
+     * This does NOT check that any possible claimed fees are accurate; checking
+     * that the fees are accurate requires checking that the input transactions are
+     * valid, which is not performed by this test. That check is done with the
+     * normal verify function.
+     */
+
 
   verify(flags = Interp.SCRIPT_ENABLE_SIGHASH_FORKID) {
     return !this.checkStr() && !this.verifyStr(flags);
   }
+  /*
+     * Returns true if the transaction was verified successfully (that is no
+     * error was found), and false otherwise. In case an error was found the
+     * error message can be accessed by calling this.getDebugString().
+     */
+
 
   async asyncVerify(flags) {
     const verifyStr = await this.asyncVerifyStr(flags);
     return !this.checkStr() && !verifyStr;
   }
+  /**
+     * Convenience method to verify a transaction.
+     */
+
 
   static verify(tx, txOutMap, flags) {
     return new TxVerifier(tx, txOutMap).verify(flags);
@@ -7621,8 +9032,15 @@ class TxVerifier extends Struct {
   static asyncVerify(tx, txOutMap, flags) {
     return new TxVerifier(tx, txOutMap).asyncVerify(flags);
   }
+  /**
+     * Check that a transaction passes basic sanity tests. If not, return a string
+     * describing the error. This function contains the same logic as
+     * CheckTransaction in bitcoin core.
+     */
+
 
   checkStr() {
+    // Basic checks that don't depend on any context
     if (this.tx.txIns.length === 0 || this.tx.txInsVi.toNumber() === 0) {
       this.errStr = 'transaction txIns empty';
       return this.errStr;
@@ -7631,12 +9049,14 @@ class TxVerifier extends Struct {
     if (this.tx.txOuts.length === 0 || this.tx.txOutsVi.toNumber() === 0) {
       this.errStr = 'transaction txOuts empty';
       return this.errStr;
-    }
+    } // Size limits
+
 
     if (this.tx.toBuffer().length > Block.MAX_BLOCK_SIZE) {
       this.errStr = 'transaction over the maximum block size';
       return this.errStr;
-    }
+    } // Check for negative or overflow output values
+
 
     let valueoutbn = new Bn(0);
 
@@ -7659,7 +9079,8 @@ class TxVerifier extends Struct {
         this.errStr = 'transaction txOut ' + i + ' total output greater than MAX_MONEY';
         return this.errStr;
       }
-    }
+    } // Check for duplicate inputs
+
 
     const txInmap = {};
 
@@ -7693,6 +9114,11 @@ class TxVerifier extends Struct {
 
     return false;
   }
+  /**
+     * verify the transaction inputs by running the script interpreter. Returns a
+     * string of the script interpreter is invalid, otherwise returns false.
+     */
+
 
   verifyStr(flags) {
     for (let i = 0; i < this.tx.txIns.length; i++) {
@@ -7717,6 +9143,11 @@ class TxVerifier extends Struct {
 
     return false;
   }
+  /**
+     * Verify a particular input by running the script interpreter. Returns true if
+     * the input is valid, false otherwise.
+     */
+
 
   verifyNIn(nIn, flags) {
     const txIn = this.tx.txIns[nIn];
@@ -7766,6 +9197,15 @@ class TxVerifier extends Struct {
 
 }
 
+/**
+ * Aes (experimental)
+ * ==================
+ *
+ * Advanced Encryption Standard (Aes). This is a low-level tool for encrypting
+ * or decrypting blocks of data. There is almost never a reason to use this -
+ * don't use it unless you need to encrypt or decrypt individual blocks.
+ */
+
 class Aes {}
 
 Aes.encrypt = function (messageBuf, keyBuf) {
@@ -7809,6 +9249,18 @@ Aes.words2Buf = function (words) {
 
   return buf;
 };
+
+/**
+ * Cbc
+ * ===
+ *
+ * Cipher Block Chaining (Cbc). This is a low-level tool for chaining multiple
+ * encrypted blocks together, usually with Aes. This is a low-level tool that
+ * does not include authentication. You should only be using this if you have
+ * authentication at another step. It is best combined with Hmac.
+ *
+ * http://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#Cipher-block_chaining_.28Cbc.29
+ */
 
 class Cbc {}
 
@@ -7932,6 +9384,15 @@ Cbc.xorBufs = function (buf1, buf2) {
   return buf;
 };
 
+/**
+ * Aescbc (experimental)
+ * =====================
+ *
+ * This is a convenience class for using Aes with Cbc. This is a low-level tool
+ * that does not include authentication. You should only use this if you are
+ * authenticating your data somehow else.
+ */
+
 class Aescbc {}
 
 Aescbc.encrypt = function (messageBuf, cipherKeyBuf, ivBuf, concatIvBuf = true) {
@@ -7956,6 +9417,17 @@ Aescbc.decrypt = function (encBuf, cipherKeyBuf, ivBuf = false) {
     return Cbc.decrypt(ctBuf, ivBuf, Aes, cipherKeyBuf);
   }
 };
+
+/**
+ * Ach (Aes+Cbc+Hmac) (experimental)
+ * =================================
+ *
+ * An "encrypt-then-MAC" that uses Aes, Cbc and SHA256 Hmac. This is suitable
+ * for general encryption of data.
+ *
+ * The encrypted data takes the form:
+ * (256 bit hmac)(128 bit iv)(128+ bits Aes+Cbc encrypted message)
+ */
 
 class Ach {}
 
@@ -7996,6 +9468,11 @@ Ach.asyncDecrypt = async function (encBuf, cipherKeyBuf) {
   const workersResult = await Workers.asyncClassMethod(Ach, 'decrypt', args);
   return workersResult.resbuf;
 };
+
+/**
+ * Ecies
+ * =====
+ */
 
 class Ecies {}
 
@@ -8041,7 +9518,8 @@ Ecies.electrumDecrypt = function (encBuf, toPrivKey) {
 
   if (!magic.equals(Buffer.from('BIE1'))) {
     throw new Error('Invalid Magic');
-  }
+  } // BIE1 use compressed public key, length is always 33.
+
 
   const pub = encBuf.slice(4, 37);
   const fromPubKey = PubKey.fromDer(pub);
@@ -8132,6 +9610,15 @@ Ecies.asyncBitcoreDecrypt = async function (encBuf, toPrivKey) {
   const workersResult = await Workers.asyncClassMethod(Ecies, 'bitcoreDecrypt', args);
   return workersResult.resbuf;
 };
+
+/**
+ * bsv
+ * ===
+ *
+ * entry.js is the entry point for a the js bundlers.
+ * Webpack and microbundlers, both start use this file as
+ * the entry point to bundle the entire library.
+ */
 
 const deps = {
   aes: _Aes,
